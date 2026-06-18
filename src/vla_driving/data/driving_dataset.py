@@ -51,7 +51,7 @@ class DrivingDataset(Dataset[dict[str, torch.Tensor]]):
         return {
             "image": self.image_transform(image),
             "lidar": torch.from_numpy(lidar),
-            "pose": torch.tensor(sample["pose"], dtype=torch.float32),
+            "pose": torch.tensor(self._build_state(sample), dtype=torch.float32),
             "route": torch.from_numpy(route),
             "waypoints": torch.from_numpy(waypoints),
         }
@@ -77,3 +77,17 @@ class DrivingDataset(Dataset[dict[str, torch.Tensor]]):
         length = min(points.shape[0], count)
         fitted[:length] = points[:length, :2]
         return fitted
+
+    @staticmethod
+    def _build_state(sample: dict[str, Any]) -> list[float]:
+        pose = list(sample["pose"])
+        lap_progress = float(sample.get("lap_progress", 0.0))
+        laps_remaining = float(sample.get("laps_remaining", 3.0))
+        route_mode = DrivingDataset._route_mode_id(sample.get("route_mode_id", sample.get("route_mode", 0.0)))
+        return pose + [lap_progress, laps_remaining, route_mode]
+
+    @staticmethod
+    def _route_mode_id(value: Any) -> float:
+        if isinstance(value, str):
+            return {"main": 0.0, "shortcut": 1.0}.get(value, 0.0)
+        return float(value)
