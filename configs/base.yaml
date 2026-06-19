@@ -9,7 +9,7 @@ data:
   lidar_size: 360
   route_points: 10
   waypoint_count: 5
-  waypoint_dim: 3
+  waypoint_dim: 4
 
 model:
   image_channels: 3
@@ -17,7 +17,7 @@ model:
   pose_dim: 4
   route_points: 10
   waypoint_count: 5
-  waypoint_dim: 3
+  waypoint_dim: 4
   hidden_dim: 128
   dropout: 0.1
   fusion_type: transformer
