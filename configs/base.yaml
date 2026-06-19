@@ -9,6 +9,7 @@ data:
   lidar_size: 360
   route_points: 10
   waypoint_count: 5
+  waypoint_dim: 3
 
 model:
   image_channels: 3
@@ -16,6 +17,7 @@ model:
   pose_dim: 5
   route_points: 10
   waypoint_count: 5
+  waypoint_dim: 3
   hidden_dim: 128
   dropout: 0.1
   fusion_type: transformer
@@ -53,4 +55,5 @@ ros2:
     odom: /odom
     local_route: /local_route
     steering_cmd: /vla_driving/steering
+    speed_cmd: /vla_driving/speed
     waypoints: /vla_driving/waypoints

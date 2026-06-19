@@ -20,12 +20,14 @@ class DrivingDataset(Dataset[dict[str, torch.Tensor]]):
         lidar_size: int,
         route_points: int,
         waypoint_count: int,
+        waypoint_dim: int = 2,
     ) -> None:
         self.data_root = Path(data_root)
         self.samples = self._load_manifest(manifest_path)
         self.lidar_size = lidar_size
         self.route_points = route_points
         self.waypoint_count = waypoint_count
+        self.waypoint_dim = waypoint_dim
         self.image_transform = transforms.Compose(
             [
                 transforms.Resize(image_size),
@@ -46,6 +48,7 @@ class DrivingDataset(Dataset[dict[str, torch.Tensor]]):
         waypoints = self._fit_points(
             np.asarray(sample["future_waypoints"], dtype=np.float32),
             self.waypoint_count,
+            self.waypoint_dim,
         )
 
         return {
@@ -70,12 +73,13 @@ class DrivingDataset(Dataset[dict[str, torch.Tensor]]):
         return fitted
 
     @staticmethod
-    def _fit_points(points: np.ndarray, count: int) -> np.ndarray:
-        fitted = np.zeros((count, 2), dtype=np.float32)
+    def _fit_points(points: np.ndarray, count: int, dim: int = 2) -> np.ndarray:
+        fitted = np.zeros((count, dim), dtype=np.float32)
         if points.size == 0:
             return fitted
         length = min(points.shape[0], count)
-        fitted[:length] = points[:length, :2]
+        width = min(points.shape[1], dim)
+        fitted[:length, :width] = points[:length, :width]
         return fitted
 
     @staticmethod

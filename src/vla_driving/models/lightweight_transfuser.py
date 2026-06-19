@@ -67,21 +67,22 @@ class PoseRouteEncoder(nn.Module):
 
 
 class MLPFusionHead(nn.Module):
-    def __init__(self, hidden_dim: int, waypoint_count: int, dropout: float) -> None:
+    def __init__(self, hidden_dim: int, waypoint_count: int, waypoint_dim: int, dropout: float) -> None:
         super().__init__()
         self.waypoint_count = waypoint_count
+        self.waypoint_dim = waypoint_dim
         self.net = nn.Sequential(
             nn.Linear(hidden_dim * 3, hidden_dim * 2),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, waypoint_count * 2),
+            nn.Linear(hidden_dim, waypoint_count * waypoint_dim),
         )
 
     def forward(self, features: list[torch.Tensor]) -> torch.Tensor:
         fused = torch.cat(features, dim=1)
-        return self.net(fused).view(-1, self.waypoint_count, 2)
+        return self.net(fused).view(-1, self.waypoint_count, self.waypoint_dim)
 
 
 class TransformerFusionHead(nn.Module):
@@ -89,12 +90,14 @@ class TransformerFusionHead(nn.Module):
         self,
         hidden_dim: int,
         waypoint_count: int,
+        waypoint_dim: int,
         dropout: float,
         layers: int,
         heads: int,
     ) -> None:
         super().__init__()
         self.waypoint_count = waypoint_count
+        self.waypoint_dim = waypoint_dim
         self.cls_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
         self.modality_embedding = nn.Parameter(torch.zeros(1, 4, hidden_dim))
         encoder_layer = nn.TransformerEncoderLayer(
@@ -110,7 +113,7 @@ class TransformerFusionHead(nn.Module):
             nn.LayerNorm(hidden_dim),
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
-            nn.Linear(hidden_dim, waypoint_count * 2),
+            nn.Linear(hidden_dim, waypoint_count * waypoint_dim),
         )
 
     def forward(self, features: list[torch.Tensor]) -> torch.Tensor:
@@ -119,7 +122,7 @@ class TransformerFusionHead(nn.Module):
         tokens = torch.stack(features, dim=1)
         tokens = torch.cat([cls, tokens], dim=1) + self.modality_embedding
         fused = self.encoder(tokens)[:, 0]
-        return self.head(fused).view(-1, self.waypoint_count, 2)
+        return self.head(fused).view(-1, self.waypoint_count, self.waypoint_dim)
 
 
 class LightweightTransFuser(nn.Module):
@@ -130,6 +133,7 @@ class LightweightTransFuser(nn.Module):
         pose_dim: int = 4,
         route_points: int = 10,
         waypoint_count: int = 5,
+        waypoint_dim: int = 2,
         hidden_dim: int = 128,
         dropout: float = 0.1,
         fusion_type: str = "transformer",
@@ -142,11 +146,12 @@ class LightweightTransFuser(nn.Module):
         self.lidar_encoder = LidarEncoder(hidden_dim)
         self.pose_route_encoder = PoseRouteEncoder(pose_dim, route_points, hidden_dim)
         if fusion_type == "mlp":
-            self.fusion = MLPFusionHead(hidden_dim, waypoint_count, dropout)
+            self.fusion = MLPFusionHead(hidden_dim, waypoint_count, waypoint_dim, dropout)
         elif fusion_type == "transformer":
             self.fusion = TransformerFusionHead(
                 hidden_dim=hidden_dim,
                 waypoint_count=waypoint_count,
+                waypoint_dim=waypoint_dim,
                 dropout=dropout,
                 layers=transformer_layers,
                 heads=transformer_heads,

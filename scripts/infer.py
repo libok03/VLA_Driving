@@ -80,6 +80,7 @@ class Ros2InferenceNode:
         self.node.create_subscription(Odometry, topics["odom"], self._on_odom, qos)
         self.node.create_subscription(Path, topics["local_route"], self._on_route, qos)
         self.steering_pub = self.node.create_publisher(Float32, topics["steering_cmd"], qos)
+        self.speed_pub = self.node.create_publisher(Float32, topics["speed_cmd"], qos)
         self.waypoints_pub = self.node.create_publisher(Float32MultiArray, topics["waypoints"], qos)
         period = 1.0 / float(cfg["ros2"].get("inference_hz", 10.0))
         self.node.create_timer(period, self._tick)
@@ -139,14 +140,19 @@ class Ros2InferenceNode:
         self.recent_waypoints.append(waypoints)
 
         steering = 0.0 if lap_state.finished else self.controller.steer_from_waypoints(waypoints)
-        self._publish(steering, waypoints)
+        speed = 0.0 if lap_state.finished else self._speed_from_waypoints(waypoints)
+        self._publish(steering, speed, waypoints)
 
-    def _publish(self, steering: float, waypoints: np.ndarray) -> None:
+    def _publish(self, steering: float, speed: float, waypoints: np.ndarray) -> None:
         Float32 = self.msg_types["Float32"]
         Float32MultiArray = self.msg_types["Float32MultiArray"]
         steering_msg = Float32()
         steering_msg.data = float(steering)
         self.steering_pub.publish(steering_msg)
+
+        speed_msg = Float32()
+        speed_msg.data = float(speed)
+        self.speed_pub.publish(speed_msg)
 
         waypoints_msg = Float32MultiArray()
         waypoints_msg.data = waypoints.astype(np.float32).reshape(-1).tolist()
@@ -184,6 +190,12 @@ class Ros2InferenceNode:
 
     def _route_mode_for_lap(self, lap_count: int) -> float:
         return 1.0 if lap_count in self.shortcut_allowed_laps else 0.0
+
+    @staticmethod
+    def _speed_from_waypoints(waypoints: np.ndarray) -> float:
+        if waypoints.shape[1] < 3:
+            return 0.0
+        return float(max(waypoints[0, 2], 0.0))
 
     @staticmethod
     def _resolve_device(name: str) -> torch.device:

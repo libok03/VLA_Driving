@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_left
 import json
 import math
 from pathlib import Path
@@ -11,6 +12,7 @@ from PIL import Image as PILImage
 
 from vla_driving.planning.lap_counter import LapCounter
 from vla_driving.utils.config import load_config
+from vla_driving.utils.geometry import world_to_ego
 
 
 class Ros2BagExtractor:
@@ -24,6 +26,8 @@ class Ros2BagExtractor:
         storage_id: str,
         waypoints_topic: str,
         require_waypoints: bool,
+        generate_waypoints_from_odom: bool,
+        future_step_s: float,
     ) -> None:
         self.cfg = cfg
         self.bag_path = Path(bag_path)
@@ -36,11 +40,14 @@ class Ros2BagExtractor:
         self.storage_id = storage_id
         self.waypoints_topic = waypoints_topic
         self.require_waypoints = require_waypoints
+        self.generate_waypoints_from_odom = generate_waypoints_from_odom
+        self.future_step_ns = int(future_step_s * 1_000_000_000)
 
         data_cfg = cfg["data"]
         self.lidar_size = int(data_cfg["lidar_size"])
         self.route_points = int(data_cfg["route_points"])
         self.waypoint_count = int(data_cfg["waypoint_count"])
+        self.waypoint_dim = int(data_cfg.get("waypoint_dim", 2))
         route_cfg = cfg["route"]
         self.lap_counter = LapCounter(
             gate_a=tuple(route_cfg["finish_gate_a"]),
@@ -63,6 +70,8 @@ class Ros2BagExtractor:
         self.route = np.zeros((self.route_points, 2), dtype=np.float32)
         self.route_mode_id = 0
         self.future_waypoints: np.ndarray | None = None
+        self.odom_trajectory: list[tuple[int, float, float, float]] = []
+        self.odom_times: list[int] = []
         self.next_sample_time_ns: int | None = None
         self.sample_index = 0
 
@@ -76,11 +85,7 @@ class Ros2BagExtractor:
         if self.manifest_path.exists():
             self.manifest_path.unlink()
 
-        reader = SequentialReader()
-        reader.open(
-            StorageOptions(uri=str(self.bag_path), storage_id=self.storage_id),
-            ConverterOptions(input_serialization_format="cdr", output_serialization_format="cdr"),
-        )
+        reader = self._open_reader(SequentialReader, StorageOptions, ConverterOptions)
 
         topic_types = {
             topic_metadata.name: topic_metadata.type for topic_metadata in reader.get_all_topics_and_types()
@@ -90,6 +95,10 @@ class Ros2BagExtractor:
             for topic, type_name in topic_types.items()
             if topic in set(self.topics.values())
         }
+
+        if self.generate_waypoints_from_odom:
+            self._collect_odom_trajectory(reader, deserialize_message, message_types)
+            reader = self._open_reader(SequentialReader, StorageOptions, ConverterOptions)
 
         while reader.has_next():
             topic, raw_data, timestamp_ns = reader.read_next()
@@ -107,6 +116,38 @@ class Ros2BagExtractor:
                 self.next_sample_time_ns = timestamp_ns + self.sample_period_ns
 
         return self.sample_index
+
+    def _open_reader(self, reader_cls: Any, storage_options_cls: Any, converter_options_cls: Any) -> Any:
+        reader = reader_cls()
+        reader.open(
+            storage_options_cls(uri=str(self.bag_path), storage_id=self.storage_id),
+            converter_options_cls(input_serialization_format="cdr", output_serialization_format="cdr"),
+        )
+        return reader
+
+    def _collect_odom_trajectory(
+        self,
+        reader: Any,
+        deserialize_message: Any,
+        message_types: dict[str, Any],
+    ) -> None:
+        odom_topic = self.topics["odom"]
+        if odom_topic not in message_types:
+            return
+
+        trajectory: list[tuple[int, float, float, float]] = []
+        while reader.has_next():
+            topic, raw_data, timestamp_ns = reader.read_next()
+            if topic != odom_topic:
+                continue
+            msg = deserialize_message(raw_data, message_types[topic])
+            position = msg.pose.pose.position
+            orientation = msg.pose.pose.orientation
+            yaw = self._yaw_from_quaternion(orientation.x, orientation.y, orientation.z, orientation.w)
+            trajectory.append((timestamp_ns, float(position.x), float(position.y), yaw))
+
+        self.odom_trajectory = trajectory
+        self.odom_times = [item[0] for item in trajectory]
 
     def _update_state(self, topic: str, msg: Any, timestamp_ns: int) -> None:
         if topic == self.topics["image"]:
@@ -145,6 +186,12 @@ class Ros2BagExtractor:
         if self.image is None or self.pose is None:
             return
 
+        future_waypoints = self.future_waypoints
+        if self.generate_waypoints_from_odom:
+            future_waypoints = self._future_waypoints_from_odom(timestamp_ns)
+            if future_waypoints is None:
+                return
+
         stem = f"{self.sample_index:06d}"
         image_path = self.image_dir / f"{stem}.jpg"
         lidar_path = self.lidar_dir / f"{stem}.npy"
@@ -160,8 +207,8 @@ class Ros2BagExtractor:
             "route": self.route.astype(float).tolist(),
             "stamp": timestamp_ns / 1_000_000_000.0,
         }
-        if self.future_waypoints is not None:
-            sample["future_waypoints"] = self.future_waypoints.astype(float).tolist()
+        if future_waypoints is not None:
+            sample["future_waypoints"] = future_waypoints.astype(float).tolist()
 
         with self.manifest_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(sample, separators=(",", ":")) + "\n")
@@ -177,10 +224,49 @@ class Ros2BagExtractor:
 
     def _fit_waypoints(self, values: Any) -> np.ndarray:
         flat = np.asarray(values, dtype=np.float32)
-        points = flat[: flat.shape[0] - (flat.shape[0] % 2)].reshape(-1, 2)
-        fitted = np.zeros((self.waypoint_count, 2), dtype=np.float32)
+        usable = flat.shape[0] - (flat.shape[0] % self.waypoint_dim)
+        points = flat[:usable].reshape(-1, self.waypoint_dim)
+        fitted = np.zeros((self.waypoint_count, self.waypoint_dim), dtype=np.float32)
         fitted[: min(self.waypoint_count, points.shape[0])] = points[: self.waypoint_count]
         return fitted
+
+    def _future_waypoints_from_odom(self, timestamp_ns: int) -> np.ndarray | None:
+        if self.pose is None or len(self.odom_trajectory) < 2:
+            return None
+
+        current_x, current_y, _, current_yaw = self.pose
+        waypoints = np.zeros((self.waypoint_count, self.waypoint_dim), dtype=np.float32)
+        future_xy: list[tuple[float, float]] = []
+        future_speeds: list[float] = []
+
+        for offset in range(1, self.waypoint_count + 1):
+            target_time_ns = timestamp_ns + offset * self.future_step_ns
+            idx = bisect_left(self.odom_times, target_time_ns)
+            if idx >= len(self.odom_trajectory):
+                return None
+            _, x, y, _ = self.odom_trajectory[idx]
+            future_xy.append((x, y))
+            future_speeds.append(self._speed_at_odom_index(idx))
+
+        points_ego = world_to_ego(
+            np.asarray(future_xy, dtype=np.float32),
+            (current_x, current_y, current_yaw),
+        )
+        waypoints[:, :2] = points_ego[:, :2]
+        if self.waypoint_dim >= 3:
+            waypoints[:, 2] = np.asarray(future_speeds, dtype=np.float32)
+        return waypoints
+
+    def _speed_at_odom_index(self, idx: int) -> float:
+        if idx <= 0 or idx >= len(self.odom_trajectory):
+            return 0.0
+        t0, x0, y0, _ = self.odom_trajectory[idx - 1]
+        t1, x1, y1, _ = self.odom_trajectory[idx]
+        dt = (t1 - t0) / 1_000_000_000.0
+        if dt <= 1e-6:
+            return 0.0
+        distance = math.hypot(x1 - x0, y1 - y0)
+        return float(distance / dt)
 
     @staticmethod
     def _image_msg_to_pil(msg: Any) -> PILImage.Image:
@@ -227,17 +313,30 @@ def main() -> None:
     parser.add_argument(
         "--waypoints-topic",
         default="",
-        help="Optional Float32MultiArray label topic with flattened future waypoint x,y pairs.",
+        help="Optional Float32MultiArray label topic with flattened future waypoint x,y,speed triples.",
     )
     parser.add_argument(
         "--require-waypoints",
         action="store_true",
         help="Only write samples after the waypoint label topic has been received.",
     )
+    parser.add_argument(
+        "--generate-waypoints-from-odom",
+        action="store_true",
+        help="Generate future waypoint labels from future odometry instead of reading a label topic.",
+    )
+    parser.add_argument(
+        "--future-step-s",
+        type=float,
+        default=0.2,
+        help="Time spacing, in seconds, between generated future odometry waypoints.",
+    )
     args = parser.parse_args()
 
     if args.sample_hz <= 0.0:
         raise SystemExit("--sample-hz must be greater than zero.")
+    if args.future_step_s <= 0.0:
+        raise SystemExit("--future-step-s must be greater than zero.")
 
     try:
         import rclpy  # noqa: F401
@@ -257,6 +356,8 @@ def main() -> None:
         storage_id=args.storage_id,
         waypoints_topic=args.waypoints_topic,
         require_waypoints=args.require_waypoints,
+        generate_waypoints_from_odom=args.generate_waypoints_from_odom,
+        future_step_s=args.future_step_s,
     ).run()
     print(f"Wrote {count} samples to {args.output_dir}")
 
