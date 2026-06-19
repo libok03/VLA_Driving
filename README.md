@@ -84,6 +84,27 @@ data/ros2_bag/
   manifest.jsonl
 ```
 
+Bag topic meanings:
+
+- `/camera/image_raw` (`sensor_msgs/Image`): front camera image. This is saved as
+  `images/000000.jpg` and becomes the model's visual input. Supported encodings are
+  `rgb8`, `bgr8`, `mono8`, and `8uc1`.
+- `/scan` (`sensor_msgs/LaserScan`): 2D LiDAR range scan. The ranges are saved as
+  `lidar/000000.npy` and padded or clipped to `data.lidar_size`.
+- `/odom` (`nav_msgs/Odometry`): vehicle world pose. The extractor stores
+  `[x, y, z, yaw]` in the manifest, with yaw computed from the odometry quaternion.
+- `/local_route` (`nav_msgs/Path`): optional short route segment in ego coordinates.
+  Each pose position should use `x` as forward distance and `y` as lateral offset.
+  If missing, `route` is filled with zeros.
+- `/vla_driving/lap_progress` (`std_msgs/Float32`): optional normalized lap progress
+  from `0.0` to `1.0`. If missing, `lap_progress` defaults to `0.0`.
+- `/vla_driving/route_mode` (`std_msgs/Int32`): optional route selector, where `0`
+  means `main` and `1` means `shortcut`. If missing, it defaults to `main`.
+
+The required extraction topics are `/camera/image_raw`, `/scan`, and `/odom`.
+The route and lap topics are useful model inputs, but they are not required for the
+extractor to write samples.
+
 If the bag contains expert future waypoint labels as a flattened `std_msgs/Float32MultiArray`
 topic, include them for training targets:
 
