@@ -67,6 +67,32 @@ All paths are resolved relative to `data_root`.
 python scripts/train.py --config configs/base.yaml
 ```
 
+## Extract Dataset From ROS2 Bag
+
+ROS2 bag files can be converted into the expected dataset layout:
+
+```powershell
+python scripts/extract_ros2_bag.py C:\path\to\bag --config configs/base.yaml --output-dir data/ros2_bag --sample-hz 10
+```
+
+The extractor reads the ROS2 topic names from `configs/base.yaml` and writes:
+
+```text
+data/ros2_bag/
+  images/000000.jpg
+  lidar/000000.npy
+  manifest.jsonl
+```
+
+If the bag contains expert future waypoint labels as a flattened `std_msgs/Float32MultiArray`
+topic, include them for training targets:
+
+```powershell
+python scripts/extract_ros2_bag.py C:\path\to\bag --output-dir data/ros2_bag --waypoints-topic /expert/waypoints --require-waypoints
+```
+
+For MCAP bags, add `--storage-id mcap`.
+
 ## ROS2 Inference
 
 ```powershell
