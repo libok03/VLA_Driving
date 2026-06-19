@@ -20,9 +20,10 @@ class PurePursuitController:
         if waypoints.size == 0:
             return 0.0
 
-        distances = np.linalg.norm(waypoints, axis=1)
+        points_xy = waypoints[:, :2]
+        distances = np.linalg.norm(points_xy, axis=1)
         idx = int(np.argmin(np.abs(distances - self.lookahead_distance)))
-        target_x, target_y = waypoints[idx]
+        target_x, target_y = points_xy[idx]
         lookahead = max(float(np.linalg.norm([target_x, target_y])), 1e-3)
         curvature = 2.0 * target_y / (lookahead * lookahead)
         steering = math.atan(self.wheel_base * curvature)

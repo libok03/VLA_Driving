@@ -29,6 +29,7 @@ def build_dataset(cfg: dict, split: str) -> DrivingDataset:
         lidar_size=data_cfg["lidar_size"],
         route_points=data_cfg["route_points"],
         waypoint_count=data_cfg["waypoint_count"],
+        waypoint_dim=data_cfg.get("waypoint_dim", 2),
     )
 
 
