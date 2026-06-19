@@ -53,7 +53,7 @@ Create a metadata JSONL file where each line contains one sample:
   "pose": [12.3, 0.0, 1.57],
   "route_mode": "main",
   "route": [[1.0, 0.1], [2.0, 0.2], [3.0, 0.2]],
-  "future_waypoints": [[1.0, 0.1, 1.2], [2.0, 0.2, 1.2], [3.0, 0.2, 0.8], [4.0, 0.1, 0.0], [5.0, 0.0, 0.0]]
+  "future_waypoints": [[1.0, 0.1, 1.2, 0.02], [2.0, 0.2, 1.2, 0.03], [3.0, 0.2, 0.8, 0.01], [4.0, 0.1, 0.0, 0.0], [5.0, 0.0, 0.0, 0.0]]
 }
 ```
 
@@ -105,14 +105,15 @@ The required extraction topics are `/camera/image_raw`, `/scan`, and `/odom`.
 write samples.
 
 If the bag contains expert future waypoint labels as a flattened `std_msgs/Float32MultiArray`
-topic, include them for training targets. Each future waypoint is `[x, y, speed]`;
-use `speed = 0.0` for stop targets:
+topic, include them for training targets. Each future waypoint is `[x, y, speed, yaw]`;
+use `speed = 0.0` for stop targets. `yaw` is the waypoint heading relative to the
+current vehicle yaw, in radians:
 
 ```powershell
 python scripts/extract_ros2_bag.py C:\path\to\bag --output-dir data/ros2_bag --waypoints-topic /expert/waypoints --require-waypoints
 ```
 
-If the bag does not contain a label topic, generate `[x, y, speed]` targets from
+If the bag does not contain a label topic, generate `[x, y, speed, yaw]` targets from
 future `/odom` samples during extraction:
 
 ```powershell
@@ -120,7 +121,8 @@ python scripts/extract_ros2_bag.py C:\path\to\bag --output-dir data/ros2_bag --g
 ```
 
 In this mode, the speed label is computed from future odometry displacement over
-time. If the vehicle stays still, the generated speed target is `0.0`.
+time, and yaw is generated from future odometry heading relative to the current
+vehicle yaw. If the vehicle stays still, the generated speed target is `0.0`.
 
 For MCAP bags, add `--storage-id mcap`.
 
@@ -141,7 +143,7 @@ It publishes:
 
 - `/vla_driving/steering` (`std_msgs/Float32`)
 - `/vla_driving/speed` (`std_msgs/Float32`, target speed in meters per second)
-- `/vla_driving/waypoints` (`std_msgs/Float32MultiArray`, flattened `x, y, speed` triples)
+- `/vla_driving/waypoints` (`std_msgs/Float32MultiArray`, flattened `x, y, speed, yaw` values)
 
 Topic names and inference rate are configured in `configs/base.yaml`.
 

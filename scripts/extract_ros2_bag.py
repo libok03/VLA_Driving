@@ -12,7 +12,7 @@ from PIL import Image as PILImage
 
 from vla_driving.planning.lap_counter import LapCounter
 from vla_driving.utils.config import load_config
-from vla_driving.utils.geometry import world_to_ego
+from vla_driving.utils.geometry import world_to_ego, wrap_angle
 
 
 class Ros2BagExtractor:
@@ -224,11 +224,23 @@ class Ros2BagExtractor:
 
     def _fit_waypoints(self, values: Any) -> np.ndarray:
         flat = np.asarray(values, dtype=np.float32)
-        usable = flat.shape[0] - (flat.shape[0] % self.waypoint_dim)
-        points = flat[:usable].reshape(-1, self.waypoint_dim)
+        source_dim = self._waypoint_source_dim(flat.shape[0])
+        usable = flat.shape[0] - (flat.shape[0] % source_dim)
+        points = flat[:usable].reshape(-1, source_dim)
         fitted = np.zeros((self.waypoint_count, self.waypoint_dim), dtype=np.float32)
-        fitted[: min(self.waypoint_count, points.shape[0])] = points[: self.waypoint_count]
+        length = min(self.waypoint_count, points.shape[0])
+        width = min(self.waypoint_dim, source_dim)
+        fitted[:length, :width] = points[:length, :width]
         return fitted
+
+    def _waypoint_source_dim(self, flat_size: int) -> int:
+        if flat_size % self.waypoint_dim == 0:
+            return self.waypoint_dim
+        if self.waypoint_dim >= 4 and flat_size % 3 == 0:
+            return 3
+        if self.waypoint_dim >= 3 and flat_size % 2 == 0:
+            return 2
+        return self.waypoint_dim
 
     def _future_waypoints_from_odom(self, timestamp_ns: int) -> np.ndarray | None:
         if self.pose is None or len(self.odom_trajectory) < 2:
@@ -238,15 +250,17 @@ class Ros2BagExtractor:
         waypoints = np.zeros((self.waypoint_count, self.waypoint_dim), dtype=np.float32)
         future_xy: list[tuple[float, float]] = []
         future_speeds: list[float] = []
+        future_yaws: list[float] = []
 
         for offset in range(1, self.waypoint_count + 1):
             target_time_ns = timestamp_ns + offset * self.future_step_ns
             idx = bisect_left(self.odom_times, target_time_ns)
             if idx >= len(self.odom_trajectory):
                 return None
-            _, x, y, _ = self.odom_trajectory[idx]
+            _, x, y, waypoint_yaw = self.odom_trajectory[idx]
             future_xy.append((x, y))
             future_speeds.append(self._speed_at_odom_index(idx))
+            future_yaws.append(wrap_angle(waypoint_yaw - current_yaw))
 
         points_ego = world_to_ego(
             np.asarray(future_xy, dtype=np.float32),
@@ -255,6 +269,8 @@ class Ros2BagExtractor:
         waypoints[:, :2] = points_ego[:, :2]
         if self.waypoint_dim >= 3:
             waypoints[:, 2] = np.asarray(future_speeds, dtype=np.float32)
+        if self.waypoint_dim >= 4:
+            waypoints[:, 3] = np.asarray(future_yaws, dtype=np.float32)
         return waypoints
 
     def _speed_at_odom_index(self, idx: int) -> float:
@@ -313,7 +329,7 @@ def main() -> None:
     parser.add_argument(
         "--waypoints-topic",
         default="",
-        help="Optional Float32MultiArray label topic with flattened future waypoint x,y,speed triples.",
+        help="Optional Float32MultiArray label topic with flattened future waypoint x,y,speed,yaw values.",
     )
     parser.add_argument(
         "--require-waypoints",
