@@ -4,7 +4,7 @@ Lightweight multimodal driving stack for fixed-route driving with:
 
 - camera image
 - 2D LiDAR scan
-- pose `(x, y, z, yaw)`
+- pose/state `(x, y, z, yaw, route_mode)`
 - optional route points in ego coordinates
 
 The first baseline is TransFuser-inspired but intentionally small: separate encoders for each modality, compact fusion, waypoint prediction, and a Pure Pursuit controller. Fusion can be either `mlp` or a tiny token-level `transformer`.
@@ -51,8 +51,6 @@ Create a metadata JSONL file where each line contains one sample:
   "image": "images/000001.jpg",
   "lidar": "lidar/000001.npy",
   "pose": [12.3, 0.0, 0.0, 1.57],
-  "lap_progress": 0.42,
-  "laps_remaining": 2,
   "route_mode": "main",
   "route": [[1.0, 0.1], [2.0, 0.2], [3.0, 0.2]],
   "future_waypoints": [[1.0, 0.1], [2.0, 0.2], [3.0, 0.2], [4.0, 0.1], [5.0, 0.0]]
@@ -96,14 +94,15 @@ Bag topic meanings:
 - `/local_route` (`nav_msgs/Path`): optional short route segment in ego coordinates.
   Each pose position should use `x` as forward distance and `y` as lateral offset.
   If missing, `route` is filled with zeros.
-- `/vla_driving/lap_progress` (`std_msgs/Float32`): optional normalized lap progress
-  from `0.0` to `1.0`. If missing, `lap_progress` defaults to `0.0`.
-- `/vla_driving/route_mode` (`std_msgs/Int32`): optional route selector, where `0`
-  means `main` and `1` means `shortcut`. If missing, it defaults to `main`.
+
+`route_mode` is generated from the detected lap count, not read from the bag:
+
+- lap `0` (first lap): `route_mode = 0` (`main`)
+- lap `1` and lap `2` (second and third laps): `route_mode = 1` (`shortcut`)
 
 The required extraction topics are `/camera/image_raw`, `/scan`, and `/odom`.
-The route and lap topics are useful model inputs, but they are not required for the
-extractor to write samples.
+`/local_route` is useful for training, but it is not required for the extractor to
+write samples.
 
 If the bag contains expert future waypoint labels as a flattened `std_msgs/Float32MultiArray`
 topic, include them for training targets:
@@ -126,8 +125,6 @@ python scripts/infer.py --config configs/base.yaml --checkpoint checkpoints/best
 - `/scan` (`sensor_msgs/LaserScan`)
 - `/odom` (`nav_msgs/Odometry`)
 - `/local_route` (`nav_msgs/Path`, route points in ego coordinates)
-- `/vla_driving/lap_progress` (`std_msgs/Float32`, `0.0` to `1.0`)
-- `/vla_driving/route_mode` (`std_msgs/Int32`, `0` main, `1` shortcut)
 
 It publishes:
 
@@ -142,8 +139,9 @@ Three-lap driving is handled outside the neural model with a directed start/fini
 
 - the vehicle must leave the gate area before the counter is armed
 - a lap increments only on gate crossing in the configured forward direction
-- cooldown and minimum lap progress prevent double counts near the line
-- `lap_progress`, `laps_remaining`, and `route_mode` are appended to the model state
+- cooldown and arming distance prevent double counts near the line
+- `route_mode` is appended to the model state
+- first lap uses `route_mode = 0`, second and third laps use `route_mode = 1`
 
 Shortcut logic should select the active local route first, then pass those route points to the model. The model predicts waypoints for the selected route rather than deciding the whole race state by itself.
 
@@ -159,7 +157,7 @@ shortcut_route_world: [[x0, y0], [x1, y1], ...]
 At each cycle:
 
 ```text
-1. choose route_mode: main or shortcut
+1. choose route_mode from the lap count: first lap main, later laps shortcut
 2. find nearest waypoint from current pose
 3. take the next N points, usually 10 to 30
 4. transform those points into vehicle/ego coordinates

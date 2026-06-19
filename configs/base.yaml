@@ -13,7 +13,7 @@ data:
 model:
   image_channels: 3
   lidar_size: 360
-  pose_dim: 7
+  pose_dim: 5
   route_points: 10
   waypoint_count: 5
   hidden_dim: 128
@@ -40,7 +40,6 @@ route:
   finish_gate_a: [0.0, -1.0]
   finish_gate_b: [0.0, 1.0]
   finish_forward_yaw: 0.0
-  min_lap_progress: 0.7
   lap_cooldown_s: 3.0
   lap_arm_distance_m: 1.0
   shortcut_allowed_laps: [1, 2]
@@ -53,7 +52,5 @@ ros2:
     lidar: /scan
     odom: /odom
     local_route: /local_route
-    lap_progress: /vla_driving/lap_progress
-    route_mode: /vla_driving/route_mode
     steering_cmd: /vla_driving/steering
     waypoints: /vla_driving/waypoints

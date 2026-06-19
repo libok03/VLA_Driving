@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 from PIL import Image as PILImage
 
+from vla_driving.planning.lap_counter import LapCounter
 from vla_driving.utils.config import load_config
 
 
@@ -40,6 +41,16 @@ class Ros2BagExtractor:
         self.lidar_size = int(data_cfg["lidar_size"])
         self.route_points = int(data_cfg["route_points"])
         self.waypoint_count = int(data_cfg["waypoint_count"])
+        route_cfg = cfg["route"]
+        self.lap_counter = LapCounter(
+            gate_a=tuple(route_cfg["finish_gate_a"]),
+            gate_b=tuple(route_cfg["finish_gate_b"]),
+            forward_yaw=route_cfg["finish_forward_yaw"],
+            total_laps=route_cfg["total_laps"],
+            cooldown_s=route_cfg["lap_cooldown_s"],
+            arm_distance_m=route_cfg["lap_arm_distance_m"],
+        )
+        self.shortcut_allowed_laps = set(int(v) for v in route_cfg.get("shortcut_allowed_laps", []))
 
         self.topics = dict(cfg["ros2"]["topics"])
         if self.waypoints_topic:
@@ -50,8 +61,6 @@ class Ros2BagExtractor:
         self.has_lidar = False
         self.pose: tuple[float, float, float, float] | None = None
         self.route = np.zeros((self.route_points, 2), dtype=np.float32)
-        self.lap_progress = 0.0
-        self.laps_remaining = float(cfg.get("route", {}).get("total_laps", 3))
         self.route_mode_id = 0
         self.future_waypoints: np.ndarray | None = None
         self.next_sample_time_ns: int | None = None
@@ -88,7 +97,7 @@ class Ros2BagExtractor:
                 continue
 
             msg = deserialize_message(raw_data, message_types[topic])
-            self._update_state(topic, msg)
+            self._update_state(topic, msg, timestamp_ns)
 
             if self.next_sample_time_ns is None:
                 self.next_sample_time_ns = timestamp_ns
@@ -99,7 +108,7 @@ class Ros2BagExtractor:
 
         return self.sample_index
 
-    def _update_state(self, topic: str, msg: Any) -> None:
+    def _update_state(self, topic: str, msg: Any, timestamp_ns: int) -> None:
         if topic == self.topics["image"]:
             self.image = self._image_msg_to_pil(msg)
         elif topic == self.topics["lidar"]:
@@ -110,15 +119,18 @@ class Ros2BagExtractor:
             orientation = msg.pose.pose.orientation
             yaw = self._yaw_from_quaternion(orientation.x, orientation.y, orientation.z, orientation.w)
             self.pose = (float(position.x), float(position.y), float(position.z), yaw)
+            lap_state = self.lap_counter.update(
+                x=float(position.x),
+                y=float(position.y),
+                yaw=yaw,
+                timestamp_s=timestamp_ns / 1_000_000_000.0,
+            )
+            self.route_mode_id = self._route_mode_for_lap(lap_state.lap_count)
         elif topic == self.topics["local_route"]:
             route = np.zeros((self.route_points, 2), dtype=np.float32)
             for idx, pose_stamped in enumerate(msg.poses[: self.route_points]):
                 route[idx] = [pose_stamped.pose.position.x, pose_stamped.pose.position.y]
             self.route = route
-        elif topic == self.topics["lap_progress"]:
-            self.lap_progress = float(np.clip(msg.data, 0.0, 1.0))
-        elif topic == self.topics["route_mode"]:
-            self.route_mode_id = int(msg.data)
         elif topic == self.topics.get("future_waypoints"):
             self.future_waypoints = self._fit_waypoints(msg.data)
 
@@ -143,8 +155,6 @@ class Ros2BagExtractor:
             "image": image_path.relative_to(self.output_dir).as_posix(),
             "lidar": lidar_path.relative_to(self.output_dir).as_posix(),
             "pose": [float(v) for v in self.pose],
-            "lap_progress": self.lap_progress,
-            "laps_remaining": self.laps_remaining,
             "route_mode": self._route_mode_name(self.route_mode_id),
             "route_mode_id": self.route_mode_id,
             "route": self.route.astype(float).tolist(),
@@ -201,6 +211,9 @@ class Ros2BagExtractor:
     @staticmethod
     def _route_mode_name(route_mode_id: int) -> str:
         return "shortcut" if route_mode_id == 1 else "main"
+
+    def _route_mode_for_lap(self, lap_count: int) -> int:
+        return 1 if lap_count in self.shortcut_allowed_laps else 0
 
 
 def main() -> None:

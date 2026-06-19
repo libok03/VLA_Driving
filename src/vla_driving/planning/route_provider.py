@@ -10,7 +10,7 @@ from vla_driving.utils.geometry import world_to_ego
 @dataclass(frozen=True)
 class LocalRoute:
     points_ego: np.ndarray
-    lap_progress: float
+    route_progress: float
     nearest_index: int
 
 
@@ -40,10 +40,10 @@ class RouteProvider:
         nearest_idx = int(np.argmin(np.linalg.norm(route - np.array([x, y], dtype=np.float32), axis=1)))
         indices = (nearest_idx + np.arange(self.route_points)) % len(route)
         points_ego = world_to_ego(route[indices], (x, y, yaw))
-        lap_progress = nearest_idx / max(len(route) - 1, 1)
+        route_progress = nearest_idx / max(len(route) - 1, 1)
         return LocalRoute(
             points_ego=points_ego.astype(np.float32),
-            lap_progress=float(lap_progress),
+            route_progress=float(route_progress),
             nearest_index=nearest_idx,
         )
 

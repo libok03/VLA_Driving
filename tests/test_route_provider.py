@@ -13,7 +13,7 @@ def test_route_provider_returns_fixed_ego_points() -> None:
 
     assert local.points_ego.shape == (3, 2)
     assert local.nearest_index == 1
-    assert local.lap_progress > 0.0
+    assert local.route_progress > 0.0
 
 
 def test_route_provider_uses_shortcut_when_requested() -> None:

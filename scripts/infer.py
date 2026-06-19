@@ -22,7 +22,7 @@ class Ros2InferenceNode:
         from rclpy.node import Node
         from sensor_msgs.msg import Image, LaserScan
         from nav_msgs.msg import Odometry, Path
-        from std_msgs.msg import Float32, Float32MultiArray, Int32
+        from std_msgs.msg import Float32, Float32MultiArray
 
         class _Node(Node):
             pass
@@ -35,7 +35,6 @@ class Ros2InferenceNode:
             "Path": Path,
             "Float32": Float32,
             "Float32MultiArray": Float32MultiArray,
-            "Int32": Int32,
         }
         self.node = _Node("vla_driving_inference")
         self.cfg = cfg
@@ -62,7 +61,6 @@ class Ros2InferenceNode:
             gate_b=tuple(route_cfg["finish_gate_b"]),
             forward_yaw=route_cfg["finish_forward_yaw"],
             total_laps=route_cfg["total_laps"],
-            min_progress=route_cfg["min_lap_progress"],
             cooldown_s=route_cfg["lap_cooldown_s"],
             arm_distance_m=route_cfg["lap_arm_distance_m"],
         )
@@ -71,8 +69,7 @@ class Ros2InferenceNode:
         self.lidar_tensor: torch.Tensor | None = None
         self.pose: tuple[float, float, float, float] | None = None
         self.route = np.zeros((self.route_points, 2), dtype=np.float32)
-        self.lap_progress = 0.0
-        self.route_mode_id = 0.0
+        self.shortcut_allowed_laps = set(int(v) for v in route_cfg.get("shortcut_allowed_laps", []))
         self.last_stamp_s = 0.0
         self.recent_waypoints: deque[np.ndarray] = deque(maxlen=3)
 
@@ -82,8 +79,6 @@ class Ros2InferenceNode:
         self.node.create_subscription(LaserScan, topics["lidar"], self._on_lidar, qos)
         self.node.create_subscription(Odometry, topics["odom"], self._on_odom, qos)
         self.node.create_subscription(Path, topics["local_route"], self._on_route, qos)
-        self.node.create_subscription(Float32, topics["lap_progress"], self._on_lap_progress, qos)
-        self.node.create_subscription(Int32, topics["route_mode"], self._on_route_mode, qos)
         self.steering_pub = self.node.create_publisher(Float32, topics["steering_cmd"], qos)
         self.waypoints_pub = self.node.create_publisher(Float32MultiArray, topics["waypoints"], qos)
         period = 1.0 / float(cfg["ros2"].get("inference_hz", 10.0))
@@ -118,12 +113,6 @@ class Ros2InferenceNode:
             route[idx] = [pose_stamped.pose.position.x, pose_stamped.pose.position.y]
         self.route = route
 
-    def _on_lap_progress(self, msg) -> None:
-        self.lap_progress = float(np.clip(msg.data, 0.0, 1.0))
-
-    def _on_route_mode(self, msg) -> None:
-        self.route_mode_id = float(msg.data)
-
     def _tick(self) -> None:
         if self.image_tensor is None or self.lidar_tensor is None or self.pose is None:
             return
@@ -134,10 +123,10 @@ class Ros2InferenceNode:
             y=y,
             yaw=yaw,
             timestamp_s=self.last_stamp_s,
-            lap_progress=self.lap_progress,
         )
+        route_mode_id = self._route_mode_for_lap(lap_state.lap_count)
         state = torch.tensor(
-            [[x, y, z, yaw, self.lap_progress, float(lap_state.laps_remaining), self.route_mode_id]],
+            [[x, y, z, yaw, route_mode_id]],
             dtype=torch.float32,
             device=self.device,
         )
@@ -192,6 +181,9 @@ class Ros2InferenceNode:
     @staticmethod
     def _stamp_to_seconds(stamp) -> float:
         return float(stamp.sec) + float(stamp.nanosec) * 1e-9
+
+    def _route_mode_for_lap(self, lap_count: int) -> float:
+        return 1.0 if lap_count in self.shortcut_allowed_laps else 0.0
 
     @staticmethod
     def _resolve_device(name: str) -> torch.device:
