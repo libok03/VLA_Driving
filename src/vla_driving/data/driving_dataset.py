@@ -85,8 +85,14 @@ class DrivingDataset(Dataset[dict[str, torch.Tensor]]):
     @staticmethod
     def _build_state(sample: dict[str, Any]) -> list[float]:
         pose = list(sample["pose"])
+        if len(pose) >= 4:
+            x, y, yaw = pose[0], pose[1], pose[3]
+        elif len(pose) == 3:
+            x, y, yaw = pose
+        else:
+            raise ValueError("pose must be [x, y, yaw] or legacy [x, y, z, yaw]")
         route_mode = DrivingDataset._route_mode_id(sample.get("route_mode_id", sample.get("route_mode", 0.0)))
-        return pose + [route_mode]
+        return [x, y, yaw, route_mode]
 
     @staticmethod
     def _route_mode_id(value: Any) -> float:

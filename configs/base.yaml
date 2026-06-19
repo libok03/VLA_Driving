@@ -14,7 +14,7 @@ data:
 model:
   image_channels: 3
   lidar_size: 360
-  pose_dim: 5
+  pose_dim: 4
   route_points: 10
   waypoint_count: 5
   waypoint_dim: 3

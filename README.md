@@ -4,7 +4,7 @@ Lightweight multimodal driving stack for fixed-route driving with:
 
 - camera image
 - 2D LiDAR scan
-- pose/state `(x, y, z, yaw, route_mode)`
+- pose/state `(x, y, yaw, route_mode)`
 - optional route points in ego coordinates
 
 The first baseline is TransFuser-inspired but intentionally small: separate encoders for each modality, compact fusion, waypoint prediction, and a Pure Pursuit controller. Fusion can be either `mlp` or a tiny token-level `transformer`.
@@ -50,7 +50,7 @@ Create a metadata JSONL file where each line contains one sample:
 {
   "image": "images/000001.jpg",
   "lidar": "lidar/000001.npy",
-  "pose": [12.3, 0.0, 0.0, 1.57],
+  "pose": [12.3, 0.0, 1.57],
   "route_mode": "main",
   "route": [[1.0, 0.1], [2.0, 0.2], [3.0, 0.2]],
   "future_waypoints": [[1.0, 0.1, 1.2], [2.0, 0.2, 1.2], [3.0, 0.2, 0.8], [4.0, 0.1, 0.0], [5.0, 0.0, 0.0]]
@@ -90,7 +90,7 @@ Bag topic meanings:
 - `/scan` (`sensor_msgs/LaserScan`): 2D LiDAR range scan. The ranges are saved as
   `lidar/000000.npy` and padded or clipped to `data.lidar_size`.
 - `/odom` (`nav_msgs/Odometry`): vehicle world pose. The extractor stores
-  `[x, y, z, yaw]` in the manifest, with yaw computed from the odometry quaternion.
+  `[x, y, yaw]` in the manifest, with yaw computed from the odometry quaternion.
 - `/local_route` (`nav_msgs/Path`): optional short route segment in ego coordinates.
   Each pose position should use `x` as forward distance and `y` as lateral offset.
   If missing, `route` is filled with zeros.

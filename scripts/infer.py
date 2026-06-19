@@ -67,7 +67,7 @@ class Ros2InferenceNode:
 
         self.image_tensor: torch.Tensor | None = None
         self.lidar_tensor: torch.Tensor | None = None
-        self.pose: tuple[float, float, float, float] | None = None
+        self.pose: tuple[float, float, float] | None = None
         self.route = np.zeros((self.route_points, 2), dtype=np.float32)
         self.shortcut_allowed_laps = set(int(v) for v in route_cfg.get("shortcut_allowed_laps", []))
         self.last_stamp_s = 0.0
@@ -105,7 +105,7 @@ class Ros2InferenceNode:
         position = msg.pose.pose.position
         orientation = msg.pose.pose.orientation
         yaw = self._yaw_from_quaternion(orientation.x, orientation.y, orientation.z, orientation.w)
-        self.pose = (float(position.x), float(position.y), float(position.z), yaw)
+        self.pose = (float(position.x), float(position.y), yaw)
         self.last_stamp_s = self._stamp_to_seconds(msg.header.stamp)
 
     def _on_route(self, msg) -> None:
@@ -118,7 +118,7 @@ class Ros2InferenceNode:
         if self.image_tensor is None or self.lidar_tensor is None or self.pose is None:
             return
 
-        x, y, z, yaw = self.pose
+        x, y, yaw = self.pose
         lap_state = self.lap_counter.update(
             x=x,
             y=y,
@@ -127,7 +127,7 @@ class Ros2InferenceNode:
         )
         route_mode_id = self._route_mode_for_lap(lap_state.lap_count)
         state = torch.tensor(
-            [[x, y, z, yaw, route_mode_id]],
+            [[x, y, yaw, route_mode_id]],
             dtype=torch.float32,
             device=self.device,
         )

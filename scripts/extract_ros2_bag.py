@@ -66,7 +66,7 @@ class Ros2BagExtractor:
         self.image: PILImage.Image | None = None
         self.lidar = np.zeros(self.lidar_size, dtype=np.float32)
         self.has_lidar = False
-        self.pose: tuple[float, float, float, float] | None = None
+        self.pose: tuple[float, float, float] | None = None
         self.route = np.zeros((self.route_points, 2), dtype=np.float32)
         self.route_mode_id = 0
         self.future_waypoints: np.ndarray | None = None
@@ -159,7 +159,7 @@ class Ros2BagExtractor:
             position = msg.pose.pose.position
             orientation = msg.pose.pose.orientation
             yaw = self._yaw_from_quaternion(orientation.x, orientation.y, orientation.z, orientation.w)
-            self.pose = (float(position.x), float(position.y), float(position.z), yaw)
+            self.pose = (float(position.x), float(position.y), yaw)
             lap_state = self.lap_counter.update(
                 x=float(position.x),
                 y=float(position.y),
@@ -234,7 +234,7 @@ class Ros2BagExtractor:
         if self.pose is None or len(self.odom_trajectory) < 2:
             return None
 
-        current_x, current_y, _, current_yaw = self.pose
+        current_x, current_y, current_yaw = self.pose
         waypoints = np.zeros((self.waypoint_count, self.waypoint_dim), dtype=np.float32)
         future_xy: list[tuple[float, float]] = []
         future_speeds: list[float] = []

@@ -10,12 +10,12 @@ def test_lightweight_transfuser_forward_shape() -> None:
         route_points=10,
         waypoint_count=5,
         waypoint_dim=3,
-        pose_dim=5,
+        pose_dim=4,
         fusion_type="transformer",
     )
     image = torch.randn(2, 3, 160, 320)
     lidar = torch.randn(2, 360)
-    pose = torch.randn(2, 5)
+    pose = torch.randn(2, 4)
     route = torch.randn(2, 10, 2)
     output = model(image, lidar, pose, route)
     assert output.shape == (2, 5, 3)
@@ -26,12 +26,12 @@ def test_mlp_fusion_forward_shape() -> None:
         route_points=10,
         waypoint_count=5,
         waypoint_dim=3,
-        pose_dim=5,
+        pose_dim=4,
         fusion_type="mlp",
     )
     image = torch.randn(2, 3, 160, 320)
     lidar = torch.randn(2, 360)
-    pose = torch.randn(2, 5)
+    pose = torch.randn(2, 4)
     route = torch.randn(2, 10, 2)
     output = model(image, lidar, pose, route)
     assert output.shape == (2, 5, 3)
