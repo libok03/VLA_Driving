@@ -57,9 +57,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Keyboard teleop publisher for /xycar_motor.")
     parser.add_argument("--topic", default="/xycar_motor")
     parser.add_argument("--msg-type", default="xycar_msgs/msg/XycarMotor")
-    parser.add_argument("--rate", type=float, default=20.0)
+    parser.add_argument("--rate", type=float, default=50.0)
     parser.add_argument("--speed-step", type=float, default=1.0)
-    parser.add_argument("--steer-step", type=float, default=5.0)
+    parser.add_argument("--steer-step", type=float, default=12.0)
     parser.add_argument("--max-speed", type=float, default=20.0)
     parser.add_argument("--max-angle", type=float, default=50.0)
     args = parser.parse_args()
@@ -91,9 +91,9 @@ def main() -> None:
                 elif key == "s":
                     speed -= args.speed_step
                 elif key == "a":
-                    angle += args.steer_step
-                elif key == "d":
                     angle -= args.steer_step
+                elif key == "d":
+                    angle += args.steer_step
                 elif key == "x":
                     angle = 0.0
                 elif key == " ":
