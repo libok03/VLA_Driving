@@ -11,8 +11,8 @@ HELP = """
 ROS2 Xycar teleop
 
 keys:
-  w / s : speed up / speed down
-  a / d : steer left / steer right
+  w / s : full speed / stop
+  a / d : full left / full right
   x     : center steering
   space : stop speed
   q     : quit
@@ -58,10 +58,8 @@ def main() -> None:
     parser.add_argument("--topic", default="/xycar_motor")
     parser.add_argument("--msg-type", default="xycar_msgs/msg/XycarMotor")
     parser.add_argument("--rate", type=float, default=50.0)
-    parser.add_argument("--speed-step", type=float, default=1.0)
-    parser.add_argument("--steer-step", type=float, default=12.0)
     parser.add_argument("--center-step", type=float, default=2.0)
-    parser.add_argument("--max-speed", type=float, default=22.0)
+    parser.add_argument("--max-speed", type=float, default=20.0)
     parser.add_argument("--max-angle", type=float, default=50.0)
     parser.add_argument("--no-auto-center", action="store_true")
     args = parser.parse_args()
@@ -89,13 +87,13 @@ def main() -> None:
                 if key == "q":
                     break
                 if key == "w":
-                    speed += args.speed_step
+                    speed = args.max_speed
                 elif key == "s":
-                    speed -= args.speed_step
+                    speed = 0.0
                 elif key == "a":
-                    angle -= args.steer_step
+                    angle = -args.max_angle
                 elif key == "d":
-                    angle += args.steer_step
+                    angle = args.max_angle
                 elif key == "x":
                     angle = 0.0
                 elif key == " ":
