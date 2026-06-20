@@ -58,6 +58,9 @@ class Ros2InferenceNode:
             max_steer_rad=float(control_cfg.get("max_steer_rad", 0.6)),
         )
         self.motor_enabled = bool(control_cfg.get("motor_enabled", False))
+        self.steering_mode = str(control_cfg.get("steering_mode", "pure_pursuit"))
+        self.lateral_waypoint_index = int(control_cfg.get("lateral_waypoint_index", 2))
+        self.lateral_angle_gain = float(control_cfg.get("lateral_angle_gain", 80.0))
         self.motor_angle_gain = float(control_cfg.get("motor_angle_gain", 1.0))
         self.motor_max_angle = float(control_cfg.get("motor_max_angle", 1.0))
         self.motor_speed_gain = float(control_cfg.get("motor_speed_gain", 1.0))
@@ -179,7 +182,7 @@ class Ros2InferenceNode:
             waypoints = 0.7 * waypoints + 0.3 * np.mean(np.stack(self.recent_waypoints), axis=0)
         self.recent_waypoints.append(waypoints)
 
-        steering = 0.0 if lap_state.finished else self.controller.steer_from_waypoints(waypoints)
+        steering = 0.0 if lap_state.finished else self._steer_from_waypoints(waypoints)
         speed = 0.0 if lap_state.finished else self._target_speed(waypoints)
         self._publish(steering, speed, waypoints)
 
@@ -203,7 +206,10 @@ class Ros2InferenceNode:
         if self.motor_pub is None or self.motor_msg_cls is None:
             return
         msg = self.motor_msg_cls()
-        angle_cmd = float(np.clip(steering * self.motor_angle_gain, -self.motor_max_angle, self.motor_max_angle))
+        if self.steering_mode == "lateral":
+            angle_cmd = float(np.clip(steering, -self.motor_max_angle, self.motor_max_angle))
+        else:
+            angle_cmd = float(np.clip(steering * self.motor_angle_gain, -self.motor_max_angle, self.motor_max_angle))
         speed_cmd = float(np.clip(speed * self.motor_speed_gain, self.motor_min_speed, self.motor_max_speed))
         self._assign_motor_field(msg, ("angle", "steering", "steer"), angle_cmd)
         self._assign_motor_field(msg, ("speed", "velocity", "throttle"), speed_cmd)
@@ -261,6 +267,14 @@ class Ros2InferenceNode:
         if self.fixed_speed is not None:
             return self.fixed_speed
         return self._speed_from_waypoints(waypoints)
+
+    def _steer_from_waypoints(self, waypoints: np.ndarray) -> float:
+        if self.steering_mode == "lateral":
+            if waypoints.size == 0:
+                return 0.0
+            idx = int(np.clip(self.lateral_waypoint_index, 0, waypoints.shape[0] - 1))
+            return float(waypoints[idx, 1] * self.lateral_angle_gain)
+        return self.controller.steer_from_waypoints(waypoints)
 
     @staticmethod
     def _resolve_device(name: str) -> torch.device:
