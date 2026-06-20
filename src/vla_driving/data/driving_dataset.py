@@ -8,7 +8,8 @@ import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
-from torchvision import transforms
+
+from vla_driving.perception import PerceptionExtractor
 
 
 class DrivingDataset(Dataset[dict[str, torch.Tensor]]):
@@ -17,6 +18,7 @@ class DrivingDataset(Dataset[dict[str, torch.Tensor]]):
         data_root: str | Path,
         manifest_path: str | Path,
         image_size: tuple[int, int],
+        perception_dim: int,
         lidar_size: int,
         route_points: int,
         waypoint_count: int,
@@ -28,20 +30,16 @@ class DrivingDataset(Dataset[dict[str, torch.Tensor]]):
         self.route_points = route_points
         self.waypoint_count = waypoint_count
         self.waypoint_dim = waypoint_dim
-        self.image_transform = transforms.Compose(
-            [
-                transforms.Resize(image_size),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
-            ]
-        )
+        self.perception_dim = perception_dim
+        self.perception = PerceptionExtractor({"yolo_enabled": False, "dim": perception_dim})
+        _ = image_size
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         sample = self.samples[index]
-        image = Image.open(self.data_root / sample["image"]).convert("RGB")
+        perception = self._load_perception(sample)
         lidar = np.load(self.data_root / sample["lidar"]).astype(np.float32)
         lidar = self._fit_vector(lidar, self.lidar_size)
         route = self._fit_points(np.asarray(sample.get("route", []), dtype=np.float32), self.route_points)
@@ -52,7 +50,7 @@ class DrivingDataset(Dataset[dict[str, torch.Tensor]]):
         )
 
         return {
-            "image": self.image_transform(image),
+            "perception": torch.from_numpy(perception),
             "lidar": torch.from_numpy(lidar),
             "pose": torch.tensor(self._build_state(sample), dtype=torch.float32),
             "route": torch.from_numpy(route),
@@ -64,6 +62,12 @@ class DrivingDataset(Dataset[dict[str, torch.Tensor]]):
         path = Path(manifest_path)
         with path.open("r", encoding="utf-8") as f:
             return [json.loads(line) for line in f if line.strip()]
+
+    def _load_perception(self, sample: dict[str, Any]) -> np.ndarray:
+        if "perception" in sample:
+            return self._fit_vector(np.asarray(sample["perception"], dtype=np.float32), self.perception_dim)
+        image = Image.open(self.data_root / sample["image"]).convert("RGB")
+        return self.perception.extract(np.asarray(image))
 
     @staticmethod
     def _fit_vector(values: np.ndarray, size: int) -> np.ndarray:

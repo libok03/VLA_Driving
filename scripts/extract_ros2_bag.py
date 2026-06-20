@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 from PIL import Image as PILImage
 
+from vla_driving.perception import PerceptionExtractor
 from vla_driving.planning.lap_counter import LapCounter
 from vla_driving.utils.config import load_config
 from vla_driving.utils.geometry import world_to_ego
@@ -48,6 +49,10 @@ class Ros2BagExtractor:
         self.route_points = int(data_cfg["route_points"])
         self.waypoint_count = int(data_cfg["waypoint_count"])
         self.waypoint_dim = int(data_cfg.get("waypoint_dim", 2))
+        self.perception_dim = int(data_cfg.get("perception_dim", 32))
+        perception_cfg = dict(cfg.get("ros2", {}).get("perception", {}))
+        perception_cfg["dim"] = self.perception_dim
+        self.perception_extractor = PerceptionExtractor(perception_cfg, dim=self.perception_dim)
         route_cfg = cfg["route"]
         self.lap_counter = LapCounter(
             gate_a=tuple(route_cfg["finish_gate_a"]),
@@ -64,6 +69,8 @@ class Ros2BagExtractor:
             self.topics["future_waypoints"] = self.waypoints_topic
 
         self.image: PILImage.Image | None = None
+        self.perception = np.zeros(self.perception_dim, dtype=np.float32)
+        self.has_perception = False
         self.lidar = np.zeros(self.lidar_size, dtype=np.float32)
         self.has_lidar = False
         self.pose: tuple[float, float, float] | None = None
@@ -152,6 +159,8 @@ class Ros2BagExtractor:
     def _update_state(self, topic: str, msg: Any, timestamp_ns: int) -> None:
         if topic == self.topics["image"]:
             self.image = self._image_msg_to_pil(msg)
+            self.perception = self.perception_extractor.extract(np.asarray(self.image))
+            self.has_perception = True
         elif topic == self.topics["lidar"]:
             self.lidar = self._fit_lidar(msg.ranges)
             self.has_lidar = True
@@ -176,7 +185,7 @@ class Ros2BagExtractor:
             self.future_waypoints = self._fit_waypoints(msg.data)
 
     def _has_required_state(self) -> bool:
-        if self.image is None or self.pose is None or not self.has_lidar:
+        if not self.has_perception or self.pose is None or not self.has_lidar:
             return False
         if self.require_waypoints and self.future_waypoints is None:
             return False
@@ -200,6 +209,7 @@ class Ros2BagExtractor:
 
         sample: dict[str, Any] = {
             "image": image_path.relative_to(self.output_dir).as_posix(),
+            "perception": self.perception.astype(float).tolist(),
             "lidar": lidar_path.relative_to(self.output_dir).as_posix(),
             "pose": [float(v) for v in self.pose],
             "route_mode": self._route_mode_name(self.route_mode_id),

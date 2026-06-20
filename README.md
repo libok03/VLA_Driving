@@ -2,7 +2,7 @@
 
 Lightweight multimodal driving stack for fixed-route driving with:
 
-- camera image
+- camera-derived lane/traffic-light perception features
 - 2D LiDAR scan
 - pose/state `(x, y, yaw, route_mode)`
 - optional route points in ego coordinates
@@ -12,11 +12,11 @@ The first baseline is TransFuser-inspired but intentionally small: separate enco
 ## Architecture
 
 ```text
-Image      -> lightweight CNN ----\
-2D LiDAR   -> 1D CNN ---------------> MLP or tiny Transformer -> future waypoints
-Pose/Route -> MLP ----------------/
+Camera     -> Canny lane edges + traffic-light features -> MLP ----\
+2D LiDAR   -> 1D CNN -----------------------------------------------> MLP or tiny Transformer -> future waypoints
+Pose/Route -> MLP --------------------------------------------------/
 
-future waypoints -> Pure Pursuit -> steering command
+future waypoints [x, y, speed] -> Pure Pursuit + speed command
 ```
 
 ## Repository Layout
@@ -49,6 +49,7 @@ Create a metadata JSONL file where each line contains one sample:
 ```json
 {
   "image": "images/000001.jpg",
+  "perception": [0.0, 0.1, 0.2],
   "lidar": "lidar/000001.npy",
   "pose": [12.3, 0.0, 1.57],
   "route_mode": "main",
@@ -85,8 +86,10 @@ data/ros2_bag/
 Bag topic meanings:
 
 - `/camera/image_raw` (`sensor_msgs/Image`): front camera image. This is saved as
-  `images/000000.jpg` and becomes the model's visual input. Supported encodings are
-  `rgb8`, `bgr8`, `mono8`, and `8uc1`.
+  `images/000000.jpg` for inspection, then converted into a compact `perception`
+  vector for the model. The perception vector contains Canny lane-edge summaries and
+  traffic-light state features. Supported encodings are `rgb8`, `bgr8`, `mono8`,
+  and `8uc1`.
 - `/scan` (`sensor_msgs/LaserScan`): 2D LiDAR range scan. The ranges are saved as
   `lidar/000000.npy` and padded or clipped to `data.lidar_size`.
 - `/odom` (`nav_msgs/Odometry`): vehicle world pose. The extractor stores
@@ -103,6 +106,23 @@ Bag topic meanings:
 The required extraction topics are `/camera/image_raw`, `/scan`, and `/odom`.
 `/local_route` is useful for training, but it is not required for the extractor to
 write samples.
+
+The VLA model does not consume raw RGB images directly. It consumes:
+
+```text
+perception: [32]
+lidar: [360]
+state: [x, y, yaw, route_mode]
+route: [10, 2]
+```
+
+The `perception` vector is generated from the camera frame:
+
+```text
+Canny lane-edge histogram/statistics
+traffic-light state: unknown/red/yellow/green
+traffic-light confidence
+```
 
 If the bag contains expert future waypoint labels as a flattened `std_msgs/Float32MultiArray`
 topic, include them for training targets. Each future waypoint is `[x, y, speed]`;
@@ -132,7 +152,7 @@ python scripts/infer.py --config configs/base.yaml --checkpoint checkpoints/best
 
 `scripts/infer.py` is a ROS2 node. By default it subscribes to:
 
-- `/camera/image_raw` (`sensor_msgs/Image`, `rgb8`, `bgr8`, or `mono8`)
+- `/camera/image_raw` (`sensor_msgs/Image`, converted to Canny lane + traffic-light features)
 - `/scan` (`sensor_msgs/LaserScan`)
 - `/odom` (`nav_msgs/Odometry`)
 - `/local_route` (`nav_msgs/Path`, route points in ego coordinates)

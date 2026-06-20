@@ -43,6 +43,7 @@ class LapCounter:
     def update(self, x: float, y: float, yaw: float, timestamp_s: float) -> LapState:
         point = np.asarray([x, y], dtype=np.float32)
         side = self._side_of_gate(point)
+        was_armed = self.armed
 
         if self._distance_to_gate(point) > self.arm_distance_m:
             self.armed = True
@@ -55,7 +56,7 @@ class LapCounter:
         direction_ok = abs(wrap_angle(yaw - self.forward_yaw)) <= self.yaw_tolerance_rad
         cooldown_ok = (timestamp_s - self.last_cross_time) >= self.cooldown_s
 
-        if not self.finished and self.armed and crossed and direction_ok and cooldown_ok:
+        if not self.finished and was_armed and crossed and direction_ok and cooldown_ok:
             self.lap_count += 1
             self.last_cross_time = timestamp_s
             self.armed = False

@@ -26,6 +26,7 @@ def build_dataset(cfg: dict, split: str) -> DrivingDataset:
         data_root=data_cfg["data_root"],
         manifest_path=data_cfg[manifest_key],
         image_size=tuple(data_cfg["image_size"]),
+        perception_dim=data_cfg["perception_dim"],
         lidar_size=data_cfg["lidar_size"],
         route_points=data_cfg["route_points"],
         waypoint_count=data_cfg["waypoint_count"],
@@ -89,20 +90,20 @@ def run_epoch(
     total_loss = 0.0
     total_count = 0
     for batch in tqdm(loader, leave=False):
-        image = batch["image"].to(device)
+        perception = batch["perception"].to(device)
         lidar = batch["lidar"].to(device)
         pose = batch["pose"].to(device)
         route = batch["route"].to(device)
         target = batch["waypoints"].to(device)
 
-        pred = model(image, lidar, pose, route)
+        pred = model(perception, lidar, pose, route)
         loss = loss_fn(pred, target)
         if optimizer is not None:
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
 
-        batch_size = image.shape[0]
+        batch_size = perception.shape[0]
         total_loss += float(loss.item()) * batch_size
         total_count += batch_size
     return total_loss / max(total_count, 1)

@@ -6,13 +6,14 @@ data:
   train_manifest: data/sample/train.jsonl
   val_manifest: data/sample/val.jsonl
   image_size: [160, 320]
+  perception_dim: 32
   lidar_size: 360
   route_points: 10
   waypoint_count: 5
   waypoint_dim: 3
 
 model:
-  image_channels: 3
+  perception_dim: 32
   lidar_size: 360
   pose_dim: 4
   route_points: 10
@@ -49,10 +50,17 @@ route:
 ros2:
   inference_hz: 10.0
   qos_depth: 10
+  perception:
+    yolo_model: yolov8n.pt
+    yolo_conf: 0.35
+    yolo_enabled: true
+    lane_roi_y: 0.55
+    canny_low: 60
+    canny_high: 160
   topics:
-    image: /camera/image_raw
+    image: /usb_cam/image_raw/front
     lidar: /scan
-    odom: /odom
+    odom: /scan_odom_map
     local_route: /local_route
     steering_cmd: /vla_driving/steering
     speed_cmd: /vla_driving/speed

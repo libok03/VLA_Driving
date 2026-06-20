@@ -7,11 +7,9 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from PIL import Image as PILImage
-from torchvision import transforms
-
 from vla_driving.control.pure_pursuit import PurePursuitController
 from vla_driving.models.lightweight_transfuser import LightweightTransFuser
+from vla_driving.perception import PerceptionExtractor
 from vla_driving.planning.lap_counter import LapCounter
 from vla_driving.utils.config import load_config
 
@@ -47,13 +45,9 @@ class Ros2InferenceNode:
         data_cfg = cfg["data"]
         self.lidar_size = data_cfg["lidar_size"]
         self.route_points = data_cfg["route_points"]
-        self.image_transform = transforms.Compose(
-            [
-                transforms.Resize(tuple(data_cfg["image_size"])),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
-            ]
-        )
+        perception_cfg = dict(cfg["ros2"].get("perception", {}))
+        perception_cfg["dim"] = data_cfg["perception_dim"]
+        self.perception_extractor = PerceptionExtractor(perception_cfg, dim=data_cfg["perception_dim"])
         self.controller = PurePursuitController(**cfg["control"])
         route_cfg = cfg["route"]
         self.lap_counter = LapCounter(
@@ -65,7 +59,7 @@ class Ros2InferenceNode:
             arm_distance_m=route_cfg["lap_arm_distance_m"],
         )
 
-        self.image_tensor: torch.Tensor | None = None
+        self.perception_tensor: torch.Tensor | None = None
         self.lidar_tensor: torch.Tensor | None = None
         self.pose: tuple[float, float, float] | None = None
         self.route = np.zeros((self.route_points, 2), dtype=np.float32)
@@ -90,7 +84,7 @@ class Ros2InferenceNode:
         self.node.destroy_node()
 
     def _on_image(self, msg) -> None:
-        self.image_tensor = self._image_msg_to_tensor(msg)
+        self.perception_tensor = self._image_msg_to_perception(msg)
         self.last_stamp_s = self._stamp_to_seconds(msg.header.stamp)
 
     def _on_lidar(self, msg) -> None:
@@ -115,7 +109,7 @@ class Ros2InferenceNode:
         self.route = route
 
     def _tick(self) -> None:
-        if self.image_tensor is None or self.lidar_tensor is None or self.pose is None:
+        if self.perception_tensor is None or self.lidar_tensor is None or self.pose is None:
             return
 
         x, y, yaw = self.pose
@@ -134,7 +128,7 @@ class Ros2InferenceNode:
         route = torch.from_numpy(self.route).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
-            waypoints = self.model(self.image_tensor, self.lidar_tensor, state, route)[0].cpu().numpy()
+            waypoints = self.model(self.perception_tensor, self.lidar_tensor, state, route)[0].cpu().numpy()
         if self.recent_waypoints:
             waypoints = 0.7 * waypoints + 0.3 * np.mean(np.stack(self.recent_waypoints), axis=0)
         self.recent_waypoints.append(waypoints)
@@ -158,7 +152,7 @@ class Ros2InferenceNode:
         waypoints_msg.data = waypoints.astype(np.float32).reshape(-1).tolist()
         self.waypoints_pub.publish(waypoints_msg)
 
-    def _image_msg_to_tensor(self, msg) -> torch.Tensor:
+    def _image_msg_to_perception(self, msg) -> torch.Tensor:
         channels = self._channels_for_encoding(msg.encoding)
         array = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.step)
         image = array[:, : msg.width * channels].reshape(msg.height, msg.width, channels)
@@ -166,8 +160,8 @@ class Ros2InferenceNode:
             image = image[:, :, ::-1].copy()
         if channels == 1:
             image = np.repeat(image, 3, axis=2)
-        pil_image = PILImage.fromarray(image.astype(np.uint8), mode="RGB")
-        return self.image_transform(pil_image).unsqueeze(0).to(self.device)
+        features = self.perception_extractor.extract(image.astype(np.uint8))
+        return torch.from_numpy(features).unsqueeze(0).to(self.device)
 
     @staticmethod
     def _channels_for_encoding(encoding: str) -> int:

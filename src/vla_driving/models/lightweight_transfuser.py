@@ -4,29 +4,18 @@ import torch
 from torch import nn
 
 
-class ImageEncoder(nn.Module):
-    def __init__(self, in_channels: int = 3, hidden_dim: int = 128) -> None:
+class PerceptionEncoder(nn.Module):
+    def __init__(self, perception_dim: int = 32, hidden_dim: int = 128) -> None:
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(in_channels, 24, kernel_size=5, stride=2, padding=2),
-            nn.BatchNorm2d(24),
+            nn.Linear(perception_dim, hidden_dim),
             nn.ReLU(inplace=True),
-            nn.Conv2d(24, 48, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(48),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(inplace=True),
-            nn.Conv2d(48, 96, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(96),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(96, hidden_dim, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
         )
 
-    def forward(self, image: torch.Tensor) -> torch.Tensor:
-        return self.net(image)
-
+    def forward(self, perception: torch.Tensor) -> torch.Tensor:
+        return self.net(perception)
 
 class LidarEncoder(nn.Module):
     def __init__(self, hidden_dim: int = 128) -> None:
@@ -128,7 +117,7 @@ class TransformerFusionHead(nn.Module):
 class LightweightTransFuser(nn.Module):
     def __init__(
         self,
-        image_channels: int = 3,
+        perception_dim: int = 32,
         lidar_size: int = 360,
         pose_dim: int = 4,
         route_points: int = 10,
@@ -142,7 +131,7 @@ class LightweightTransFuser(nn.Module):
     ) -> None:
         super().__init__()
         _ = lidar_size
-        self.image_encoder = ImageEncoder(image_channels, hidden_dim)
+        self.perception_encoder = PerceptionEncoder(perception_dim, hidden_dim)
         self.lidar_encoder = LidarEncoder(hidden_dim)
         self.pose_route_encoder = PoseRouteEncoder(pose_dim, route_points, hidden_dim)
         if fusion_type == "mlp":
@@ -161,12 +150,12 @@ class LightweightTransFuser(nn.Module):
 
     def forward(
         self,
-        image: torch.Tensor,
+        perception: torch.Tensor,
         lidar: torch.Tensor,
         pose: torch.Tensor,
         route: torch.Tensor,
     ) -> torch.Tensor:
-        image_feature = self.image_encoder(image)
+        perception_feature = self.perception_encoder(perception)
         lidar_feature = self.lidar_encoder(lidar)
         pose_route_feature = self.pose_route_encoder(pose, route)
-        return self.fusion([image_feature, lidar_feature, pose_route_feature])
+        return self.fusion([perception_feature, lidar_feature, pose_route_feature])
