@@ -63,6 +63,8 @@ class Ros2InferenceNode:
         self.motor_speed_gain = float(control_cfg.get("motor_speed_gain", 1.0))
         self.motor_min_speed = float(control_cfg.get("motor_min_speed", 0.0))
         self.motor_max_speed = float(control_cfg.get("motor_max_speed", 1.0))
+        fixed_speed = control_cfg.get("fixed_speed")
+        self.fixed_speed = None if fixed_speed is None else float(fixed_speed)
         self.motor_msg_type = control_cfg.get("motor_msg_type", "xycar_msgs/msg/XycarMotor")
         route_cfg = cfg["route"]
         self.lap_counter = LapCounter(
@@ -178,7 +180,7 @@ class Ros2InferenceNode:
         self.recent_waypoints.append(waypoints)
 
         steering = 0.0 if lap_state.finished else self.controller.steer_from_waypoints(waypoints)
-        speed = 0.0 if lap_state.finished else self._speed_from_waypoints(waypoints)
+        speed = 0.0 if lap_state.finished else self._target_speed(waypoints)
         self._publish(steering, speed, waypoints)
 
     def _publish(self, steering: float, speed: float, waypoints: np.ndarray) -> None:
@@ -254,6 +256,11 @@ class Ros2InferenceNode:
         if waypoints.shape[1] < 3:
             return 0.0
         return float(max(waypoints[0, 2], 0.0))
+
+    def _target_speed(self, waypoints: np.ndarray) -> float:
+        if self.fixed_speed is not None:
+            return self.fixed_speed
+        return self._speed_from_waypoints(waypoints)
 
     @staticmethod
     def _resolve_device(name: str) -> torch.device:
