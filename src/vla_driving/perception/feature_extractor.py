@@ -175,8 +175,7 @@ class PerceptionExtractor:
             best_conf = conf
 
         if best_crop is None or best_crop.size == 0:
-            height = image_rgb.shape[0]
-            best_crop = image_rgb[: max(int(height * 0.45), 1), :]
+            best_crop, best_conf = self._find_traffic_light_crop_by_color(image_rgb)
 
         state = self._classify_traffic_light_color(best_crop)
         one_hot = np.zeros(4, dtype=np.float32)
@@ -184,16 +183,58 @@ class PerceptionExtractor:
         confidence = best_conf if state != 0 else 0.0
         return np.concatenate([one_hot, np.asarray([confidence], dtype=np.float32)])
 
+    def _find_traffic_light_crop_by_color(self, image_rgb: np.ndarray) -> tuple[np.ndarray, float]:
+        height, width = image_rgb.shape[:2]
+        roi_bottom = max(int(height * 0.55), 1)
+        roi = image_rgb[:roi_bottom, :]
+        hsv = cv2.cvtColor(roi, cv2.COLOR_RGB2HSV)
+
+        color_mask = self._traffic_color_mask(hsv)
+        kernel = np.ones((3, 3), dtype=np.uint8)
+        color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_OPEN, kernel)
+        color_mask = cv2.dilate(color_mask, kernel, iterations=1)
+
+        contours, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        best_box: tuple[int, int, int, int] | None = None
+        best_score = 0.0
+
+        image_area = float(max(width * height, 1))
+        for contour in contours:
+            x, y, w, h = cv2.boundingRect(contour)
+            if w < 8 or h < 8:
+                continue
+            area = float(w * h)
+            if area < image_area * 0.0002 or area > image_area * 0.08:
+                continue
+            aspect = w / max(float(h), 1.0)
+            if not (0.45 <= aspect <= 1.8):
+                continue
+
+            pad = int(max(w, h) * 0.35)
+            x1 = max(x - pad, 0)
+            y1 = max(y - pad, 0)
+            x2 = min(x + w + pad, width)
+            y2 = min(y + h + pad, roi_bottom)
+            crop_mask = color_mask[y1:y2, x1:x2]
+            color_ratio = float(np.count_nonzero(crop_mask)) / max(float(crop_mask.size), 1.0)
+            circularity = self._contour_circularity(contour)
+            score = color_ratio * 0.7 + circularity * 0.3
+            if score > best_score:
+                best_score = score
+                best_box = (x1, y1, x2, y2)
+
+        if best_box is None:
+            return roi, 0.0
+
+        x1, y1, x2, y2 = best_box
+        return roi[y1:y2, x1:x2], float(np.clip(best_score, 0.0, 1.0))
+
     @staticmethod
     def _classify_traffic_light_color(image_rgb: np.ndarray) -> int:
         if image_rgb.size == 0:
             return 0
         hsv = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2HSV)
-        red = cv2.inRange(hsv, (0, 80, 80), (10, 255, 255)) | cv2.inRange(
-            hsv, (170, 80, 80), (180, 255, 255)
-        )
-        yellow = cv2.inRange(hsv, (15, 80, 80), (40, 255, 255))
-        green = cv2.inRange(hsv, (45, 60, 60), (95, 255, 255))
+        red, yellow, green = PerceptionExtractor._traffic_color_masks(hsv)
         counts = np.asarray(
             [np.count_nonzero(red), np.count_nonzero(yellow), np.count_nonzero(green)],
             dtype=np.float32,
@@ -202,6 +243,28 @@ class PerceptionExtractor:
         if float(counts.max()) < min_pixels:
             return 0
         return int(np.argmax(counts)) + 1
+
+    @staticmethod
+    def _traffic_color_mask(hsv: np.ndarray) -> np.ndarray:
+        masks = PerceptionExtractor._traffic_color_masks(hsv)
+        return masks[0] | masks[1] | masks[2]
+
+    @staticmethod
+    def _traffic_color_masks(hsv: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        red = cv2.inRange(hsv, (0, 80, 80), (10, 255, 255)) | cv2.inRange(
+            hsv, (170, 80, 80), (180, 255, 255)
+        )
+        yellow = cv2.inRange(hsv, (15, 80, 80), (40, 255, 255))
+        green = cv2.inRange(hsv, (45, 60, 60), (95, 255, 255))
+        return red, yellow, green
+
+    @staticmethod
+    def _contour_circularity(contour: np.ndarray) -> float:
+        area = float(cv2.contourArea(contour))
+        perimeter = float(cv2.arcLength(contour, True))
+        if area <= 0.0 or perimeter <= 1e-6:
+            return 0.0
+        return float(np.clip((4.0 * np.pi * area) / (perimeter * perimeter), 0.0, 1.0))
 
     def _detect_objects(self, image_rgb: np.ndarray) -> list[dict[str, Any]]:
         model = self._load_yolo()
