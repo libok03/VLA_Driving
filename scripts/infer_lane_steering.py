@@ -48,6 +48,7 @@ class LaneSteeringInferenceNode:
 
         control_cfg = cfg["control"]
         self.fixed_speed = float(control_cfg.get("fixed_speed", 10.0))
+        self.steering_output_gain = float(control_cfg.get("steering_output_gain", 1.0))
         self.motor_max_angle = float(control_cfg.get("motor_max_angle", 50.0))
         self.motor_msg_type = control_cfg.get("motor_msg_type", "xycar_msgs/msg/XycarMotor")
 
@@ -102,6 +103,7 @@ class LaneSteeringInferenceNode:
             return
         with torch.no_grad():
             steering = float(self.model(self.perception_tensor, self.lidar_summary_tensor)[0].cpu().item())
+        steering *= self.steering_output_gain
         steering = float(np.clip(steering, -self.motor_max_angle, self.motor_max_angle))
         self._publish(steering, self.fixed_speed)
 
