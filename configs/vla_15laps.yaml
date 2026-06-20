@@ -82,3 +82,4 @@ ros2:
     steering_cmd: /vla_driving/steering
     speed_cmd: /vla_driving/speed
     waypoints: /vla_driving/waypoints
+    waypoints_path: /vla_driving/waypoints_path

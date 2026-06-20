@@ -38,9 +38,11 @@ control:
   wheel_base: 0.32
   lookahead_distance: 1.5
   max_steer_rad: 0.6
-  steering_mode: lateral
+  steering_mode: lateral_delta
+  lateral_reference_index: 0
   lateral_waypoint_index: 4
-  lateral_angle_gain: -220.0
+  lateral_angle_gain: -120.0
+  waypoints_frame: base_link
   motor_enabled: true
   motor_topic: /xycar_motor
   motor_msg_type: xycar_msgs/msg/XycarMotor
@@ -83,3 +85,4 @@ ros2:
     steering_cmd: /vla_driving/steering
     speed_cmd: /vla_driving/speed
     waypoints: /vla_driving/waypoints
+    waypoints_path: /vla_driving/waypoints_path

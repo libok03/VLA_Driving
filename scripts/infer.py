@@ -21,6 +21,7 @@ class Ros2InferenceNode:
         from rclpy.node import Node
         from sensor_msgs.msg import Image, LaserScan
         from nav_msgs.msg import Odometry, Path
+        from geometry_msgs.msg import PoseStamped
         from std_msgs.msg import Float32, Float32MultiArray
         from rosidl_runtime_py.utilities import get_message
 
@@ -33,6 +34,7 @@ class Ros2InferenceNode:
             "LaserScan": LaserScan,
             "Odometry": Odometry,
             "Path": Path,
+            "PoseStamped": PoseStamped,
             "Float32": Float32,
             "Float32MultiArray": Float32MultiArray,
         }
@@ -59,8 +61,10 @@ class Ros2InferenceNode:
         )
         self.motor_enabled = bool(control_cfg.get("motor_enabled", False))
         self.steering_mode = str(control_cfg.get("steering_mode", "pure_pursuit"))
+        self.lateral_reference_index = int(control_cfg.get("lateral_reference_index", 0))
         self.lateral_waypoint_index = int(control_cfg.get("lateral_waypoint_index", 2))
         self.lateral_angle_gain = float(control_cfg.get("lateral_angle_gain", 80.0))
+        self.waypoints_frame = str(control_cfg.get("waypoints_frame", "base_link"))
         self.motor_angle_gain = float(control_cfg.get("motor_angle_gain", 1.0))
         self.motor_max_angle = float(control_cfg.get("motor_max_angle", 1.0))
         self.motor_speed_gain = float(control_cfg.get("motor_speed_gain", 1.0))
@@ -106,6 +110,11 @@ class Ros2InferenceNode:
         self.steering_pub = self.node.create_publisher(Float32, topics["steering_cmd"], qos)
         self.speed_pub = self.node.create_publisher(Float32, topics["speed_cmd"], qos)
         self.waypoints_pub = self.node.create_publisher(Float32MultiArray, topics["waypoints"], qos)
+        self.waypoints_path_pub = self.node.create_publisher(
+            Path,
+            topics.get("waypoints_path", "/vla_driving/waypoints_path"),
+            qos,
+        )
         self.motor_pub = None
         self.motor_msg_cls = None
         if self.motor_enabled:
@@ -201,12 +210,29 @@ class Ros2InferenceNode:
         waypoints_msg = Float32MultiArray()
         waypoints_msg.data = waypoints.astype(np.float32).reshape(-1).tolist()
         self.waypoints_pub.publish(waypoints_msg)
+        self._publish_waypoints_path(waypoints)
+
+    def _publish_waypoints_path(self, waypoints: np.ndarray) -> None:
+        Path = self.msg_types["Path"]
+        PoseStamped = self.msg_types["PoseStamped"]
+        path_msg = Path()
+        path_msg.header.stamp = self.node.get_clock().now().to_msg()
+        path_msg.header.frame_id = self.waypoints_frame
+        for waypoint in waypoints:
+            pose = PoseStamped()
+            pose.header = path_msg.header
+            pose.pose.position.x = float(waypoint[0])
+            pose.pose.position.y = float(waypoint[1])
+            pose.pose.position.z = 0.0
+            pose.pose.orientation.w = 1.0
+            path_msg.poses.append(pose)
+        self.waypoints_path_pub.publish(path_msg)
 
     def _publish_motor(self, steering: float, speed: float) -> None:
         if self.motor_pub is None or self.motor_msg_cls is None:
             return
         msg = self.motor_msg_cls()
-        if self.steering_mode == "lateral":
+        if self.steering_mode in {"lateral", "lateral_delta"}:
             angle_cmd = float(np.clip(steering, -self.motor_max_angle, self.motor_max_angle))
         else:
             angle_cmd = float(np.clip(steering * self.motor_angle_gain, -self.motor_max_angle, self.motor_max_angle))
@@ -269,11 +295,15 @@ class Ros2InferenceNode:
         return self._speed_from_waypoints(waypoints)
 
     def _steer_from_waypoints(self, waypoints: np.ndarray) -> float:
-        if self.steering_mode == "lateral":
+        if self.steering_mode in {"lateral", "lateral_delta"}:
             if waypoints.size == 0:
                 return 0.0
             idx = int(np.clip(self.lateral_waypoint_index, 0, waypoints.shape[0] - 1))
-            return float(waypoints[idx, 1] * self.lateral_angle_gain)
+            lateral_y = float(waypoints[idx, 1])
+            if self.steering_mode == "lateral_delta":
+                ref_idx = int(np.clip(self.lateral_reference_index, 0, waypoints.shape[0] - 1))
+                lateral_y -= float(waypoints[ref_idx, 1])
+            return lateral_y * self.lateral_angle_gain
         return self.controller.steer_from_waypoints(waypoints)
 
     @staticmethod
