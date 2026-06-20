@@ -53,7 +53,7 @@ ros2:
   perception:
     yolo_model: yolov8n.pt
     yolo_conf: 0.35
-    yolo_enabled: true
+    yolo_enabled: false
     lane_roi_y: 0.55
     canny_low: 60
     canny_high: 160

@@ -116,13 +116,16 @@ state: [x, y, yaw, route_mode]
 route: [10, 2]
 ```
 
-The `perception` vector is generated from the camera frame:
+The default `perception` vector is generated from the camera frame without YOLO:
 
 ```text
-Canny lane-edge histogram/statistics
-traffic-light state: unknown/red/yellow/green
+Canny lane-edge/Hough-line statistics
+HSV traffic-light state: unknown/red/yellow/green
 traffic-light confidence
 ```
+
+YOLO object detection is optional and disabled by default. Enable it only if the
+simple HSV rule is not enough for the track camera and lighting.
 
 If the bag contains expert future waypoint labels as a flattened `std_msgs/Float32MultiArray`
 topic, include them for training targets. Each future waypoint is `[x, y, speed]`;

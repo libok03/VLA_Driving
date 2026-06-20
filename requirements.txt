@@ -6,4 +6,3 @@ torch>=2.1
 torchvision>=0.16
 tqdm>=4.66
 pytest>=8.0
-ultralytics>=8.0
