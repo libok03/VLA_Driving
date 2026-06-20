@@ -177,11 +177,12 @@ class PerceptionExtractor:
         if best_crop is None or best_crop.size == 0:
             best_crop, best_conf = self._find_traffic_light_crop_by_color(image_rgb)
 
-        state = self._classify_traffic_light_color(best_crop)
+        color_scores = self._traffic_light_color_scores(best_crop)
+        state = self._state_from_color_scores(color_scores)
         one_hot = np.zeros(4, dtype=np.float32)
         one_hot[state] = 1.0
-        confidence = best_conf if state != 0 else 0.0
-        return np.concatenate([one_hot, np.asarray([confidence], dtype=np.float32)])
+        confidence = float(np.clip(max(best_conf, color_scores.max()), 0.0, 1.0)) if state != 0 else 0.0
+        return np.concatenate([color_scores, one_hot, np.asarray([confidence], dtype=np.float32)])
 
     def _find_traffic_light_crop_by_color(self, image_rgb: np.ndarray) -> tuple[np.ndarray, float]:
         height, width = image_rgb.shape[:2]
@@ -195,6 +196,7 @@ class PerceptionExtractor:
         color_mask = cv2.dilate(color_mask, kernel, iterations=1)
 
         contours, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        candidate_boxes: list[tuple[int, int, int, int, float]] = []
         best_box: tuple[int, int, int, int] | None = None
         best_score = 0.0
 
@@ -219,20 +221,35 @@ class PerceptionExtractor:
             color_ratio = float(np.count_nonzero(crop_mask)) / max(float(crop_mask.size), 1.0)
             circularity = self._contour_circularity(contour)
             score = color_ratio * 0.7 + circularity * 0.3
+            candidate_boxes.append((x1, y1, x2, y2, score))
             if score > best_score:
                 best_score = score
                 best_box = (x1, y1, x2, y2)
 
-        if best_box is None:
+        if not candidate_boxes:
             return roi, 0.0
 
-        x1, y1, x2, y2 = best_box
+        strong_boxes = [box for box in candidate_boxes if box[4] >= max(best_score * 0.45, 0.05)]
+        if len(strong_boxes) >= 2:
+            x1 = min(box[0] for box in strong_boxes)
+            y1 = min(box[1] for box in strong_boxes)
+            x2 = max(box[2] for box in strong_boxes)
+            y2 = max(box[3] for box in strong_boxes)
+        else:
+            assert best_box is not None
+            x1, y1, x2, y2 = best_box
         return roi[y1:y2, x1:x2], float(np.clip(best_score, 0.0, 1.0))
 
     @staticmethod
     def _classify_traffic_light_color(image_rgb: np.ndarray) -> int:
+        return PerceptionExtractor._state_from_color_scores(
+            PerceptionExtractor._traffic_light_color_scores(image_rgb)
+        )
+
+    @staticmethod
+    def _traffic_light_color_scores(image_rgb: np.ndarray) -> np.ndarray:
         if image_rgb.size == 0:
-            return 0
+            return np.zeros(4, dtype=np.float32)
         hsv = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2HSV)
         red, yellow, green = PerceptionExtractor._traffic_color_masks(hsv)
         counts = np.asarray(
@@ -240,9 +257,21 @@ class PerceptionExtractor:
             dtype=np.float32,
         )
         min_pixels = max(float(image_rgb.shape[0] * image_rgb.shape[1]) * 0.002, 3.0)
+        area = max(float(image_rgb.shape[0] * image_rgb.shape[1]), 1.0)
+        color_scores = np.clip(counts / area, 0.0, 1.0)
+        total_score = float(np.clip(counts.sum() / area, 0.0, 1.0))
         if float(counts.max()) < min_pixels:
+            return np.asarray([0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        return np.asarray(
+            [color_scores[0], color_scores[1], color_scores[2], total_score],
+            dtype=np.float32,
+        )
+
+    @staticmethod
+    def _state_from_color_scores(scores: np.ndarray) -> int:
+        if scores.size < 4 or float(scores[3]) <= 0.0:
             return 0
-        return int(np.argmax(counts)) + 1
+        return int(np.argmax(scores[:3])) + 1
 
     @staticmethod
     def _traffic_color_mask(hsv: np.ndarray) -> np.ndarray:

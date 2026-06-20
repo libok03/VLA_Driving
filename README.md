@@ -120,7 +120,8 @@ The default `perception` vector is generated from the camera frame without YOLO:
 
 ```text
 Canny lane-edge/Hough-line statistics
-HSV traffic-light state: unknown/red/yellow/green
+HSV traffic-light scores: red/yellow/green/total
+HSV traffic-light hard state: unknown/red/yellow/green
 traffic-light confidence
 ```
 
