@@ -37,6 +37,14 @@ control:
   wheel_base: 0.32
   lookahead_distance: 1.5
   max_steer_rad: 0.6
+  motor_enabled: true
+  motor_topic: /xycar_motor
+  motor_msg_type: xycar_msgs/msg/XycarMotor
+  motor_angle_gain: 83.3333333333
+  motor_max_angle: 50.0
+  motor_speed_gain: 10.0
+  motor_min_speed: 0.0
+  motor_max_speed: 35.0
 
 route:
   total_laps: 3
@@ -66,6 +74,7 @@ ros2:
     lidar: /scan
     odom: /scan_odom_map
     local_route: /local_route
+    motor_cmd: /xycar_motor
     steering_cmd: /vla_driving/steering
     speed_cmd: /vla_driving/speed
     waypoints: /vla_driving/waypoints

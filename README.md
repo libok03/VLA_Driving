@@ -235,8 +235,22 @@ It publishes:
 - `/vla_driving/steering` (`std_msgs/Float32`)
 - `/vla_driving/speed` (`std_msgs/Float32`, target speed in meters per second)
 - `/vla_driving/waypoints` (`std_msgs/Float32MultiArray`, flattened `x, y, speed` triples)
+- `/xycar_motor` (`xycar_msgs/XycarMotor` by default, configured in `control.motor_msg_type`)
 
 Topic names and inference rate are configured in `configs/base.yaml`.
+
+For feature-only inference with the trained checkpoint:
+
+```bash
+PYTHONPATH=src:$PYTHONPATH python3 scripts/infer.py \
+  --config configs/vla_15laps.yaml \
+  --checkpoint checkpoints/vla_15laps/best.pt
+```
+
+The inference node accepts either raw `/usb_cam/image_raw/front` frames or
+precomputed `/vla_driving/perception_features`. It runs the model, feeds the
+predicted waypoints to Pure Pursuit, and publishes motor `angle`/`speed`.
+Motor scaling is configured under `control.motor_*` in the YAML.
 
 ## Lap Handling
 
