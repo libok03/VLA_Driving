@@ -40,16 +40,19 @@ control:
 
 route:
   total_laps: 3
+  lap_trigger_mode: radius
+  lap_trigger_center: [-16.886848684798856, 29.194995142160792]
+  lap_trigger_radius_m: 3.0
   finish_gate_a: [0.0, -1.0]
   finish_gate_b: [0.0, 1.0]
   finish_forward_yaw: 0.0
   lap_cooldown_s: 3.0
   lap_arm_distance_m: 1.0
-  shortcut_allowed_laps: [1, 2]
 
 ros2:
   inference_hz: 10.0
   qos_depth: 10
+  odom_yaw_offset: 3.141592653589793
   perception:
     yolo_model: yolov8n.pt
     yolo_conf: 0.35

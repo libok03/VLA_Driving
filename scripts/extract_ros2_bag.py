@@ -13,7 +13,7 @@ from PIL import Image as PILImage
 from vla_driving.perception import PerceptionExtractor
 from vla_driving.planning.lap_counter import LapCounter
 from vla_driving.utils.config import load_config
-from vla_driving.utils.geometry import world_to_ego
+from vla_driving.utils.geometry import world_to_ego, wrap_angle
 
 
 class Ros2BagExtractor:
@@ -29,6 +29,8 @@ class Ros2BagExtractor:
         require_waypoints: bool,
         generate_waypoints_from_odom: bool,
         future_step_s: float,
+        generate_route_from_odom: bool,
+        route_step_s: float,
     ) -> None:
         self.cfg = cfg
         self.bag_path = Path(bag_path)
@@ -43,6 +45,9 @@ class Ros2BagExtractor:
         self.require_waypoints = require_waypoints
         self.generate_waypoints_from_odom = generate_waypoints_from_odom
         self.future_step_ns = int(future_step_s * 1_000_000_000)
+        self.generate_route_from_odom = generate_route_from_odom
+        self.route_step_ns = int(route_step_s * 1_000_000_000)
+        self.odom_yaw_offset = float(cfg.get("ros2", {}).get("odom_yaw_offset", 0.0))
 
         data_cfg = cfg["data"]
         self.lidar_size = int(data_cfg["lidar_size"])
@@ -61,9 +66,10 @@ class Ros2BagExtractor:
             total_laps=route_cfg["total_laps"],
             cooldown_s=route_cfg["lap_cooldown_s"],
             arm_distance_m=route_cfg["lap_arm_distance_m"],
+            trigger_mode=route_cfg.get("lap_trigger_mode", "gate"),
+            trigger_center=route_cfg.get("lap_trigger_center"),
+            trigger_radius_m=route_cfg.get("lap_trigger_radius_m", 3.0),
         )
-        self.shortcut_allowed_laps = set(int(v) for v in route_cfg.get("shortcut_allowed_laps", []))
-
         self.topics = dict(cfg["ros2"]["topics"])
         if self.waypoints_topic:
             self.topics["future_waypoints"] = self.waypoints_topic
@@ -75,7 +81,7 @@ class Ros2BagExtractor:
         self.has_lidar = False
         self.pose: tuple[float, float, float] | None = None
         self.route = np.zeros((self.route_points, 2), dtype=np.float32)
-        self.route_mode_id = 0
+        self.lap_index = 0
         self.future_waypoints: np.ndarray | None = None
         self.odom_trajectory: list[tuple[int, float, float, float]] = []
         self.odom_times: list[int] = []
@@ -103,7 +109,7 @@ class Ros2BagExtractor:
             if topic in set(self.topics.values())
         }
 
-        if self.generate_waypoints_from_odom:
+        if self.generate_waypoints_from_odom or self.generate_route_from_odom:
             self._collect_odom_trajectory(reader, deserialize_message, message_types)
             reader = self._open_reader(SequentialReader, StorageOptions, ConverterOptions)
 
@@ -150,7 +156,7 @@ class Ros2BagExtractor:
             msg = deserialize_message(raw_data, message_types[topic])
             position = msg.pose.pose.position
             orientation = msg.pose.pose.orientation
-            yaw = self._yaw_from_quaternion(orientation.x, orientation.y, orientation.z, orientation.w)
+            yaw = self._odom_yaw(orientation)
             trajectory.append((timestamp_ns, float(position.x), float(position.y), yaw))
 
         self.odom_trajectory = trajectory
@@ -167,7 +173,7 @@ class Ros2BagExtractor:
         elif topic == self.topics["odom"]:
             position = msg.pose.pose.position
             orientation = msg.pose.pose.orientation
-            yaw = self._yaw_from_quaternion(orientation.x, orientation.y, orientation.z, orientation.w)
+            yaw = self._odom_yaw(orientation)
             self.pose = (float(position.x), float(position.y), yaw)
             lap_state = self.lap_counter.update(
                 x=float(position.x),
@@ -175,7 +181,7 @@ class Ros2BagExtractor:
                 yaw=yaw,
                 timestamp_s=timestamp_ns / 1_000_000_000.0,
             )
-            self.route_mode_id = self._route_mode_for_lap(lap_state.lap_count)
+            self.lap_index = lap_state.lap_count
         elif topic == self.topics["local_route"]:
             route = np.zeros((self.route_points, 2), dtype=np.float32)
             for idx, pose_stamped in enumerate(msg.poses[: self.route_points]):
@@ -200,6 +206,11 @@ class Ros2BagExtractor:
             future_waypoints = self._future_waypoints_from_odom(timestamp_ns)
             if future_waypoints is None:
                 return
+        route = self.route
+        if self.generate_route_from_odom:
+            route = self._future_route_from_odom(timestamp_ns)
+            if route is None:
+                return
 
         stem = f"{self.sample_index:06d}"
         image_path = self.image_dir / f"{stem}.jpg"
@@ -212,9 +223,8 @@ class Ros2BagExtractor:
             "perception": self.perception.astype(float).tolist(),
             "lidar": lidar_path.relative_to(self.output_dir).as_posix(),
             "pose": [float(v) for v in self.pose],
-            "route_mode": self._route_mode_name(self.route_mode_id),
-            "route_mode_id": self.route_mode_id,
-            "route": self.route.astype(float).tolist(),
+            "lap_index": self.lap_index,
+            "route": route.astype(float).tolist(),
             "stamp": timestamp_ns / 1_000_000_000.0,
         }
         if future_waypoints is not None:
@@ -244,28 +254,63 @@ class Ros2BagExtractor:
         if self.pose is None or len(self.odom_trajectory) < 2:
             return None
 
-        current_x, current_y, current_yaw = self.pose
         waypoints = np.zeros((self.waypoint_count, self.waypoint_dim), dtype=np.float32)
-        future_xy: list[tuple[float, float]] = []
-        future_speeds: list[float] = []
-
-        for offset in range(1, self.waypoint_count + 1):
-            target_time_ns = timestamp_ns + offset * self.future_step_ns
-            idx = bisect_left(self.odom_times, target_time_ns)
-            if idx >= len(self.odom_trajectory):
-                return None
-            _, x, y, _ = self.odom_trajectory[idx]
-            future_xy.append((x, y))
-            future_speeds.append(self._speed_at_odom_index(idx))
-
-        points_ego = world_to_ego(
-            np.asarray(future_xy, dtype=np.float32),
-            (current_x, current_y, current_yaw),
+        points_ego, future_speeds = self._future_ego_points_from_odom(
+            timestamp_ns=timestamp_ns,
+            count=self.waypoint_count,
+            step_ns=self.future_step_ns,
+            include_speed=True,
         )
+        if points_ego is None or future_speeds is None:
+            return None
         waypoints[:, :2] = points_ego[:, :2]
         if self.waypoint_dim >= 3:
             waypoints[:, 2] = np.asarray(future_speeds, dtype=np.float32)
         return waypoints
+
+    def _future_route_from_odom(self, timestamp_ns: int) -> np.ndarray | None:
+        points_ego, _ = self._future_ego_points_from_odom(
+            timestamp_ns=timestamp_ns,
+            count=self.route_points,
+            step_ns=self.route_step_ns,
+            include_speed=False,
+        )
+        return points_ego
+
+    def _future_ego_points_from_odom(
+        self,
+        timestamp_ns: int,
+        count: int,
+        step_ns: int,
+        include_speed: bool,
+    ) -> tuple[np.ndarray | None, list[float] | None]:
+        if self.pose is None or len(self.odom_trajectory) < 2:
+            return None, None
+
+        current_x, current_y, current_yaw = self.pose
+        future_xy: list[tuple[float, float]] = []
+        future_speeds: list[float] = []
+
+        for offset in range(1, count + 1):
+            target_time_ns = timestamp_ns + offset * step_ns
+            idx = bisect_left(self.odom_times, target_time_ns)
+            if idx >= len(self.odom_trajectory):
+                return None, None
+            _, x, y, _ = self.odom_trajectory[idx]
+            future_xy.append((x, y))
+            if include_speed:
+                elapsed_s = (offset * step_ns) / 1_000_000_000.0
+                future_speeds.append(math.hypot(x - current_x, y - current_y) / max(elapsed_s, 1e-6))
+
+        points_ego = world_to_ego(
+            np.asarray(future_xy, dtype=np.float32),
+            (current_x, current_y, current_yaw),
+        ).astype(np.float32)
+        return points_ego, future_speeds
+
+    def _odom_yaw(self, orientation: Any) -> float:
+        yaw = self._yaw_from_quaternion(orientation.x, orientation.y, orientation.z, orientation.w)
+        return wrap_angle(yaw + self.odom_yaw_offset)
 
     def _speed_at_odom_index(self, idx: int) -> float:
         if idx <= 0 or idx >= len(self.odom_trajectory):
@@ -304,14 +349,6 @@ class Ros2BagExtractor:
         cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
         return math.atan2(siny_cosp, cosy_cosp)
 
-    @staticmethod
-    def _route_mode_name(route_mode_id: int) -> str:
-        return "shortcut" if route_mode_id == 1 else "main"
-
-    def _route_mode_for_lap(self, lap_count: int) -> int:
-        return 1 if lap_count in self.shortcut_allowed_laps else 0
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Extract VLA Driving dataset samples from a ROS2 bag.")
     parser.add_argument("bag_path", help="Path to a ROS2 bag directory.")
@@ -341,12 +378,25 @@ def main() -> None:
         default=0.2,
         help="Time spacing, in seconds, between generated future odometry waypoints.",
     )
+    parser.add_argument(
+        "--generate-route-from-odom",
+        action="store_true",
+        help="Generate local route input from future odometry instead of reading /local_route.",
+    )
+    parser.add_argument(
+        "--route-step-s",
+        type=float,
+        default=0.2,
+        help="Time spacing, in seconds, between generated local route points.",
+    )
     args = parser.parse_args()
 
     if args.sample_hz <= 0.0:
         raise SystemExit("--sample-hz must be greater than zero.")
     if args.future_step_s <= 0.0:
         raise SystemExit("--future-step-s must be greater than zero.")
+    if args.route_step_s <= 0.0:
+        raise SystemExit("--route-step-s must be greater than zero.")
 
     try:
         import rclpy  # noqa: F401
@@ -368,6 +418,8 @@ def main() -> None:
         require_waypoints=args.require_waypoints,
         generate_waypoints_from_odom=args.generate_waypoints_from_odom,
         future_step_s=args.future_step_s,
+        generate_route_from_odom=args.generate_route_from_odom,
+        route_step_s=args.route_step_s,
     ).run()
     print(f"Wrote {count} samples to {args.output_dir}")
 

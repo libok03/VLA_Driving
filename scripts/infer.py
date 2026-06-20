@@ -12,6 +12,7 @@ from vla_driving.models.lightweight_transfuser import LightweightTransFuser
 from vla_driving.perception import PerceptionExtractor
 from vla_driving.planning.lap_counter import LapCounter
 from vla_driving.utils.config import load_config
+from vla_driving.utils.geometry import wrap_angle
 
 
 class Ros2InferenceNode:
@@ -57,13 +58,16 @@ class Ros2InferenceNode:
             total_laps=route_cfg["total_laps"],
             cooldown_s=route_cfg["lap_cooldown_s"],
             arm_distance_m=route_cfg["lap_arm_distance_m"],
+            trigger_mode=route_cfg.get("lap_trigger_mode", "gate"),
+            trigger_center=route_cfg.get("lap_trigger_center"),
+            trigger_radius_m=route_cfg.get("lap_trigger_radius_m", 3.0),
         )
 
         self.perception_tensor: torch.Tensor | None = None
         self.lidar_tensor: torch.Tensor | None = None
         self.pose: tuple[float, float, float] | None = None
+        self.odom_yaw_offset = float(cfg.get("ros2", {}).get("odom_yaw_offset", 0.0))
         self.route = np.zeros((self.route_points, 2), dtype=np.float32)
-        self.shortcut_allowed_laps = set(int(v) for v in route_cfg.get("shortcut_allowed_laps", []))
         self.last_stamp_s = 0.0
         self.recent_waypoints: deque[np.ndarray] = deque(maxlen=3)
 
@@ -98,7 +102,10 @@ class Ros2InferenceNode:
     def _on_odom(self, msg) -> None:
         position = msg.pose.pose.position
         orientation = msg.pose.pose.orientation
-        yaw = self._yaw_from_quaternion(orientation.x, orientation.y, orientation.z, orientation.w)
+        yaw = wrap_angle(
+            self._yaw_from_quaternion(orientation.x, orientation.y, orientation.z, orientation.w)
+            + self.odom_yaw_offset
+        )
         self.pose = (float(position.x), float(position.y), yaw)
         self.last_stamp_s = self._stamp_to_seconds(msg.header.stamp)
 
@@ -119,9 +126,8 @@ class Ros2InferenceNode:
             yaw=yaw,
             timestamp_s=self.last_stamp_s,
         )
-        route_mode_id = self._route_mode_for_lap(lap_state.lap_count)
         state = torch.tensor(
-            [[x, y, yaw, route_mode_id]],
+            [[x, y, yaw, float(lap_state.lap_count)]],
             dtype=torch.float32,
             device=self.device,
         )
@@ -181,9 +187,6 @@ class Ros2InferenceNode:
     @staticmethod
     def _stamp_to_seconds(stamp) -> float:
         return float(stamp.sec) + float(stamp.nanosec) * 1e-9
-
-    def _route_mode_for_lap(self, lap_count: int) -> float:
-        return 1.0 if lap_count in self.shortcut_allowed_laps else 0.0
 
     @staticmethod
     def _speed_from_waypoints(waypoints: np.ndarray) -> float:

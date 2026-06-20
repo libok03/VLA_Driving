@@ -4,7 +4,7 @@ Lightweight multimodal driving stack for fixed-route driving with:
 
 - camera-derived lane/traffic-light perception features
 - 2D LiDAR scan
-- pose/state `(x, y, yaw, route_mode)`
+- pose/state `(x, y, yaw, lap_index)`
 - optional route points in ego coordinates
 
 The first baseline is TransFuser-inspired but intentionally small: separate encoders for each modality, compact fusion, waypoint prediction, and a Pure Pursuit controller. Fusion can be either `mlp` or a tiny token-level `transformer`.
@@ -52,7 +52,7 @@ Create a metadata JSONL file where each line contains one sample:
   "perception": [0.0, 0.1, 0.2],
   "lidar": "lidar/000001.npy",
   "pose": [12.3, 0.0, 1.57],
-  "route_mode": "main",
+  "lap_index": 1,
   "route": [[1.0, 0.1], [2.0, 0.2], [3.0, 0.2]],
   "future_waypoints": [[1.0, 0.1, 1.2], [2.0, 0.2, 1.2], [3.0, 0.2, 0.8], [4.0, 0.1, 0.0], [5.0, 0.0, 0.0]]
 }
@@ -85,34 +85,38 @@ data/ros2_bag/
 
 Bag topic meanings:
 
-- `/camera/image_raw` (`sensor_msgs/Image`): front camera image. This is saved as
+- `/usb_cam/image_raw/front` (`sensor_msgs/Image`): front camera image. This is saved as
   `images/000000.jpg` for inspection, then converted into a compact `perception`
   vector for the model. The perception vector contains Canny lane-edge summaries and
   traffic-light state features. Supported encodings are `rgb8`, `bgr8`, `mono8`,
   and `8uc1`.
 - `/scan` (`sensor_msgs/LaserScan`): 2D LiDAR range scan. The ranges are saved as
   `lidar/000000.npy` and padded or clipped to `data.lidar_size`.
-- `/odom` (`nav_msgs/Odometry`): vehicle world pose. The extractor stores
+- `/scan_odom_map` (`nav_msgs/Odometry`): vehicle world pose. The extractor stores
   `[x, y, yaw]` in the manifest, with yaw computed from the odometry quaternion.
 - `/local_route` (`nav_msgs/Path`): optional short route segment in ego coordinates.
   Each pose position should use `x` as forward distance and `y` as lateral offset.
-  If missing, `route` is filled with zeros.
+  If missing, the extractor can generate `route` from future odometry with
+  `--generate-route-from-odom`.
 
-`route_mode` is generated from the detected lap count, not read from the bag:
+`lap_index` is generated from odometry, not read from the bag:
 
-- lap `0` (first lap): `route_mode = 0` (`main`)
-- lap `1` and lap `2` (second and third laps): `route_mode = 1` (`shortcut`)
+- lap trigger center: `[-16.886848684798856, 29.194995142160792]`
+- lap changes when the vehicle enters within `3.0 m` of that center
+- `lap_index = 0` before the first trigger pass
+- `lap_index = 1`, `2`, `3` after each trigger pass
+- shortcut state is not encoded because shortcut availability is random
 
-The required extraction topics are `/camera/image_raw`, `/scan`, and `/odom`.
-`/local_route` is useful for training, but it is not required for the extractor to
-write samples.
+The required extraction topics for the current training bag are
+`/usb_cam/image_raw/front`, `/scan`, and `/scan_odom_map`. `/local_route` is not
+required when route is generated from the driven future trajectory.
 
 The VLA model does not consume raw RGB images directly. It consumes:
 
 ```text
 perception: [32]
 lidar: [360]
-state: [x, y, yaw, route_mode]
+state: [x, y, yaw, lap_index]
 route: [10, 2]
 ```
 
@@ -146,6 +150,19 @@ python scripts/extract_ros2_bag.py C:\path\to\bag --output-dir data/ros2_bag --g
 In this mode, the speed label is computed from future odometry displacement over
 time. If the vehicle stays still, the generated speed target is `0.0`.
 
+If the bag does not contain `/local_route`, generate the route input from the same
+future odometry trajectory:
+
+```powershell
+python scripts/extract_ros2_bag.py C:\path\to\bag --output-dir data/ros2_bag --generate-route-from-odom --route-step-s 0.2
+```
+
+For a driving-only bag, both generated labels can be enabled together:
+
+```powershell
+python scripts/extract_ros2_bag.py C:\path\to\bag --output-dir data/ros2_bag --generate-route-from-odom --generate-waypoints-from-odom
+```
+
 For MCAP bags, add `--storage-id mcap`.
 
 ## ROS2 Inference
@@ -156,9 +173,9 @@ python scripts/infer.py --config configs/base.yaml --checkpoint checkpoints/best
 
 `scripts/infer.py` is a ROS2 node. By default it subscribes to:
 
-- `/camera/image_raw` (`sensor_msgs/Image`, converted to Canny lane + traffic-light features)
+- `/usb_cam/image_raw/front` (`sensor_msgs/Image`, converted to Canny lane + traffic-light features)
 - `/scan` (`sensor_msgs/LaserScan`)
-- `/odom` (`nav_msgs/Odometry`)
+- `/scan_odom_map` (`nav_msgs/Odometry`)
 - `/local_route` (`nav_msgs/Path`, route points in ego coordinates)
 
 It publishes:
@@ -171,34 +188,19 @@ Topic names and inference rate are configured in `configs/base.yaml`.
 
 ## Lap Handling
 
-Three-lap driving is handled outside the neural model with a directed start/finish gate:
+Three-lap driving is handled outside the neural model with a radius trigger:
 
-- the vehicle must leave the gate area before the counter is armed
-- a lap increments only on gate crossing in the configured forward direction
-- cooldown and arming distance prevent double counts near the line
-- `route_mode` is appended to the model state
-- first lap uses `route_mode = 0`, second and third laps use `route_mode = 1`
-
-Shortcut logic should select the active local route first, then pass those route points to the model. The model predicts waypoints for the selected route rather than deciding the whole race state by itself.
+- the trigger center is configured in `configs/base.yaml`
+- the vehicle must first leave the trigger radius before the counter is armed
+- a lap increments when the vehicle comes back within the trigger radius
+- `lap_index` is appended to the model state as `[x, y, yaw, lap_index]`
+- shortcut availability is not encoded because it is random on this track
 
 ## Route Input
 
-Give the neural model a short local route, not the full track. Keep the full route as world-frame waypoints in a separate route node:
-
-```text
-main_route_world:     [[x0, y0], [x1, y1], ...]
-shortcut_route_world: [[x0, y0], [x1, y1], ...]
-```
-
-At each cycle:
-
-```text
-1. choose route_mode from the lap count: first lap main, later laps shortcut
-2. find nearest waypoint from current pose
-3. take the next N points, usually 10 to 30
-4. transform those points into vehicle/ego coordinates
-5. publish them as /local_route
-```
+Give the neural model a short local route, not the full track. During offline
+training, `route` can be generated directly from future `/scan_odom_map` poses in
+the same bag. It is therefore the expert's driven future path in ego coordinates.
 
 The ROS2 inference node expects `/local_route` as `nav_msgs/Path` where each pose position is already in ego coordinates:
 
@@ -208,4 +210,6 @@ y = left/right offset from vehicle
 z = unused
 ```
 
-This keeps the model focused on short-horizon driving. The route node owns global decisions like lap progress, shortcut selection, and merge timing.
+This keeps the model focused on short-horizon driving. Lap counting remains a
+separate deterministic signal, and random shortcut availability is learned only
+through the driven future route/waypoint labels present in the bag.

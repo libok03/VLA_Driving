@@ -95,11 +95,5 @@ class DrivingDataset(Dataset[dict[str, torch.Tensor]]):
             x, y, yaw = pose
         else:
             raise ValueError("pose must be [x, y, yaw] or legacy [x, y, z, yaw]")
-        route_mode = DrivingDataset._route_mode_id(sample.get("route_mode_id", sample.get("route_mode", 0.0)))
-        return [x, y, yaw, route_mode]
-
-    @staticmethod
-    def _route_mode_id(value: Any) -> float:
-        if isinstance(value, str):
-            return {"main": 0.0, "shortcut": 1.0}.get(value, 0.0)
-        return float(value)
+        lap_index = float(sample.get("lap_index", 0.0))
+        return [x, y, yaw, lap_index]
