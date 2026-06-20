@@ -37,8 +37,17 @@ def build_dataset(cfg: dict, split: str) -> DrivingDataset:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/base.yaml")
+    parser.add_argument("--data-root", default="")
+    parser.add_argument("--train-manifest", default="")
+    parser.add_argument("--val-manifest", default="")
     args = parser.parse_args()
     cfg = load_config(args.config)
+    if args.data_root:
+        cfg["data"]["data_root"] = args.data_root
+    if args.train_manifest:
+        cfg["data"]["train_manifest"] = args.train_manifest
+    if args.val_manifest:
+        cfg["data"]["val_manifest"] = args.val_manifest
 
     torch.manual_seed(cfg["seed"])
     device = resolve_device(cfg["device"])

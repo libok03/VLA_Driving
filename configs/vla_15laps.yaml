@@ -1,0 +1,71 @@
+seed: 7
+device: auto
+
+data:
+  data_root: data/vla_15laps
+  train_manifest: data/vla_15laps/train.jsonl
+  val_manifest: data/vla_15laps/val.jsonl
+  image_size: [160, 320]
+  perception_dim: 32
+  lidar_size: 360
+  route_points: 10
+  waypoint_count: 5
+  waypoint_dim: 3
+
+model:
+  perception_dim: 32
+  lidar_size: 360
+  pose_dim: 4
+  route_points: 10
+  waypoint_count: 5
+  waypoint_dim: 3
+  hidden_dim: 128
+  dropout: 0.1
+  fusion_type: transformer
+  transformer_layers: 2
+  transformer_heads: 4
+
+train:
+  batch_size: 16
+  epochs: 20
+  lr: 0.0003
+  weight_decay: 0.0001
+  num_workers: 0
+  checkpoint_dir: checkpoints/vla_15laps
+
+control:
+  wheel_base: 0.32
+  lookahead_distance: 1.5
+  max_steer_rad: 0.6
+
+route:
+  total_laps: 3
+  lap_trigger_mode: radius
+  lap_trigger_center: [-27.65140743754365, 42.07201117030527]
+  lap_trigger_radius_m: 3.0
+  finish_gate_a: [0.0, -1.0]
+  finish_gate_b: [0.0, 1.0]
+  finish_forward_yaw: 0.0
+  lap_cooldown_s: 3.0
+  lap_arm_distance_m: 1.0
+
+ros2:
+  inference_hz: 10.0
+  qos_depth: 10
+  odom_yaw_offset: 3.141592653589793
+  perception:
+    yolo_model: yolov8n.pt
+    yolo_conf: 0.35
+    yolo_enabled: false
+    lane_roi_y: 0.55
+    canny_low: 60
+    canny_high: 160
+  topics:
+    image: /usb_cam/image_raw/front
+    perception_features: /vla_driving/perception_features
+    lidar: /scan
+    odom: /scan_odom_map
+    local_route: /local_route
+    steering_cmd: /vla_driving/steering
+    speed_cmd: /vla_driving/speed
+    waypoints: /vla_driving/waypoints

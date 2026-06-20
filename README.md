@@ -105,7 +105,7 @@ Bag topic meanings:
 
 `lap_index` is generated from odometry, not read from the bag:
 
-- lap trigger center: `[-16.886848684798856, 29.194995142160792]`
+- lap trigger center: `[-27.65140743754365, 42.07201117030527]`
 - lap changes when the vehicle enters within `3.0 m` of that center
 - `lap_index = 0` before the first trigger pass
 - `lap_index = 1`, `2`, `3` after each trigger pass
@@ -176,13 +176,45 @@ To keep raw camera frames out of the training bag, run the feature publisher whi
 Unity is publishing `/usb_cam/image_raw/front`:
 
 ```bash
-PYTHONPATH=src python3 scripts/publish_camera_features.py --config configs/base.yaml
+PYTHONPATH=src:$PYTHONPATH python3 scripts/publish_camera_features.py --config configs/base.yaml
 ```
 
 Then record the feature topic instead of the camera topic:
 
 ```bash
 ros2 bag record /vla_driving/perception_features /scan /scan_odom_map
+```
+
+## Build Train/Val Splits
+
+After extracting several bags, merge them into one train/val dataset while keeping
+the `lidar` paths valid:
+
+```bash
+python3 scripts/build_dataset_split.py \
+  --output-dir data/vla_15laps \
+  --train data/rosbag2_2026_06_20-17_46_11 \
+          data/rosbag2_2026_06_20-17_54_37 \
+          data/rosbag2_2026_06_20-18_05_42 \
+          data/rosbag2_2026_06_20-18_11_00 \
+  --val data/rosbag2_2026_06_20-18_21_10
+```
+
+Then train with explicit dataset paths:
+
+```bash
+PYTHONPATH=src python3 scripts/train.py \
+  --config configs/base.yaml \
+  --data-root data/vla_15laps \
+  --train-manifest data/vla_15laps/train.jsonl \
+  --val-manifest data/vla_15laps/val.jsonl
+```
+
+On Windows, after copying the extracted `data/` directory into this repository,
+use the ready-made config:
+
+```powershell
+python scripts/train.py --config configs/vla_15laps.yaml
 ```
 
 ## ROS2 Inference
