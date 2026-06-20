@@ -41,7 +41,7 @@ control:
 route:
   total_laps: 3
   lap_trigger_mode: radius
-  lap_trigger_center: [-16.886848684798856, 29.194995142160792]
+  lap_trigger_center: [-27.65140743754365, 42.07201117030527]
   lap_trigger_radius_m: 3.0
   finish_gate_a: [0.0, -1.0]
   finish_gate_b: [0.0, 1.0]
@@ -62,6 +62,7 @@ ros2:
     canny_high: 160
   topics:
     image: /usb_cam/image_raw/front
+    perception_features: /vla_driving/perception_features
     lidar: /scan
     odom: /scan_odom_map
     local_route: /local_route

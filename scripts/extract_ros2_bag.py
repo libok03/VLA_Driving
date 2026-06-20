@@ -167,6 +167,9 @@ class Ros2BagExtractor:
             self.image = self._image_msg_to_pil(msg)
             self.perception = self.perception_extractor.extract(np.asarray(self.image))
             self.has_perception = True
+        elif topic == self.topics.get("perception_features"):
+            self.perception = self._fit_vector(msg.data, self.perception_dim)
+            self.has_perception = True
         elif topic == self.topics["lidar"]:
             self.lidar = self._fit_lidar(msg.ranges)
             self.has_lidar = True
@@ -198,7 +201,7 @@ class Ros2BagExtractor:
         return True
 
     def _write_sample(self, timestamp_ns: int) -> None:
-        if self.image is None or self.pose is None:
+        if self.pose is None:
             return
 
         future_waypoints = self.future_waypoints
@@ -213,13 +216,15 @@ class Ros2BagExtractor:
                 return
 
         stem = f"{self.sample_index:06d}"
-        image_path = self.image_dir / f"{stem}.jpg"
         lidar_path = self.lidar_dir / f"{stem}.npy"
-        self.image.save(image_path, quality=self.image_quality)
+        image_path = self.image_dir / f"{stem}.jpg"
+        image_relpath = ""
+        if self.image is not None:
+            self.image.save(image_path, quality=self.image_quality)
+            image_relpath = image_path.relative_to(self.output_dir).as_posix()
         np.save(lidar_path, self.lidar)
 
         sample: dict[str, Any] = {
-            "image": image_path.relative_to(self.output_dir).as_posix(),
             "perception": self.perception.astype(float).tolist(),
             "lidar": lidar_path.relative_to(self.output_dir).as_posix(),
             "pose": [float(v) for v in self.pose],
@@ -227,6 +232,8 @@ class Ros2BagExtractor:
             "route": route.astype(float).tolist(),
             "stamp": timestamp_ns / 1_000_000_000.0,
         }
+        if image_relpath:
+            sample["image"] = image_relpath
         if future_waypoints is not None:
             sample["future_waypoints"] = future_waypoints.astype(float).tolist()
 
@@ -238,8 +245,13 @@ class Ros2BagExtractor:
     def _fit_lidar(self, ranges: Any) -> np.ndarray:
         values = np.asarray(ranges, dtype=np.float32)
         values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
-        fitted = np.zeros(self.lidar_size, dtype=np.float32)
-        fitted[: min(self.lidar_size, values.shape[0])] = values[: self.lidar_size]
+        return self._fit_vector(values, self.lidar_size)
+
+    @staticmethod
+    def _fit_vector(values: Any, size: int) -> np.ndarray:
+        values = np.asarray(values, dtype=np.float32)
+        fitted = np.zeros(size, dtype=np.float32)
+        fitted[: min(size, values.shape[0])] = values[:size]
         return fitted
 
     def _fit_waypoints(self, values: Any) -> np.ndarray:

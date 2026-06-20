@@ -90,6 +90,10 @@ Bag topic meanings:
   vector for the model. The perception vector contains Canny lane-edge summaries and
   traffic-light state features. Supported encodings are `rgb8`, `bgr8`, `mono8`,
   and `8uc1`.
+- `/vla_driving/perception_features` (`std_msgs/Float32MultiArray`): optional
+  precomputed camera feature vector. If this topic is recorded instead of the raw
+  camera image, the extractor uses it directly and does not require image frames in
+  the bag.
 - `/scan` (`sensor_msgs/LaserScan`): 2D LiDAR range scan. The ranges are saved as
   `lidar/000000.npy` and padded or clipped to `data.lidar_size`.
 - `/scan_odom_map` (`nav_msgs/Odometry`): vehicle world pose. The extractor stores
@@ -107,9 +111,10 @@ Bag topic meanings:
 - `lap_index = 1`, `2`, `3` after each trigger pass
 - shortcut state is not encoded because shortcut availability is random
 
-The required extraction topics for the current training bag are
-`/usb_cam/image_raw/front`, `/scan`, and `/scan_odom_map`. `/local_route` is not
-required when route is generated from the driven future trajectory.
+The required extraction topics for the current training bag are `/scan`,
+`/scan_odom_map`, and either `/usb_cam/image_raw/front` or
+`/vla_driving/perception_features`. `/local_route` is not required when route is
+generated from the driven future trajectory.
 
 The VLA model does not consume raw RGB images directly. It consumes:
 
@@ -164,6 +169,21 @@ python scripts/extract_ros2_bag.py C:\path\to\bag --output-dir data/ros2_bag --g
 ```
 
 For MCAP bags, add `--storage-id mcap`.
+
+## Camera Feature Publisher
+
+To keep raw camera frames out of the training bag, run the feature publisher while
+Unity is publishing `/usb_cam/image_raw/front`:
+
+```bash
+PYTHONPATH=src python3 scripts/publish_camera_features.py --config configs/base.yaml
+```
+
+Then record the feature topic instead of the camera topic:
+
+```bash
+ros2 bag record /vla_driving/perception_features /scan /scan_odom_map
+```
 
 ## ROS2 Inference
 
