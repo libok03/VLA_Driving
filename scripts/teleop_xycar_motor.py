@@ -60,8 +60,10 @@ def main() -> None:
     parser.add_argument("--rate", type=float, default=50.0)
     parser.add_argument("--speed-step", type=float, default=1.0)
     parser.add_argument("--steer-step", type=float, default=12.0)
-    parser.add_argument("--max-speed", type=float, default=20.0)
+    parser.add_argument("--center-step", type=float, default=2.0)
+    parser.add_argument("--max-speed", type=float, default=22.0)
     parser.add_argument("--max-angle", type=float, default=50.0)
+    parser.add_argument("--no-auto-center", action="store_true")
     args = parser.parse_args()
 
     try:
@@ -98,6 +100,11 @@ def main() -> None:
                     angle = 0.0
                 elif key == " ":
                     speed = 0.0
+                elif not args.no_auto_center:
+                    if angle > 0.0:
+                        angle = max(0.0, angle - args.center_step)
+                    elif angle < 0.0:
+                        angle = min(0.0, angle + args.center_step)
 
                 speed = clamp(speed, 0.0, args.max_speed)
                 angle = clamp(angle, -args.max_angle, args.max_angle)
