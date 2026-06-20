@@ -31,6 +31,7 @@ def build_dataset(cfg: dict, split: str) -> DrivingDataset:
         route_points=data_cfg["route_points"],
         waypoint_count=data_cfg["waypoint_count"],
         waypoint_dim=data_cfg.get("waypoint_dim", 2),
+        use_route=bool(data_cfg.get("use_route", True)),
     )
 
 

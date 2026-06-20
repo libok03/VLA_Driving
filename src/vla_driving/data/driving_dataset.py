@@ -23,6 +23,7 @@ class DrivingDataset(Dataset[dict[str, torch.Tensor]]):
         route_points: int,
         waypoint_count: int,
         waypoint_dim: int = 2,
+        use_route: bool = True,
     ) -> None:
         self.data_root = Path(data_root)
         self.samples = self._load_manifest(manifest_path)
@@ -30,6 +31,7 @@ class DrivingDataset(Dataset[dict[str, torch.Tensor]]):
         self.route_points = route_points
         self.waypoint_count = waypoint_count
         self.waypoint_dim = waypoint_dim
+        self.use_route = use_route
         self.perception_dim = perception_dim
         self.perception = PerceptionExtractor({"yolo_enabled": False, "dim": perception_dim})
         _ = image_size
@@ -42,7 +44,10 @@ class DrivingDataset(Dataset[dict[str, torch.Tensor]]):
         perception = self._load_perception(sample)
         lidar = np.load(self.data_root / sample["lidar"]).astype(np.float32)
         lidar = self._fit_vector(lidar, self.lidar_size)
-        route = self._fit_points(np.asarray(sample.get("route", []), dtype=np.float32), self.route_points)
+        if self.use_route:
+            route = self._fit_points(np.asarray(sample.get("route", []), dtype=np.float32), self.route_points)
+        else:
+            route = np.zeros((self.route_points, 2), dtype=np.float32)
         waypoints = self._fit_points(
             np.asarray(sample["future_waypoints"], dtype=np.float32),
             self.waypoint_count,

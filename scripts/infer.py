@@ -47,6 +47,7 @@ class Ros2InferenceNode:
         data_cfg = cfg["data"]
         self.lidar_size = data_cfg["lidar_size"]
         self.route_points = data_cfg["route_points"]
+        self.use_route = bool(data_cfg.get("use_route", True))
         perception_cfg = dict(cfg["ros2"].get("perception", {}))
         perception_cfg["dim"] = data_cfg["perception_dim"]
         self.perception_extractor = PerceptionExtractor(perception_cfg, dim=data_cfg["perception_dim"])
@@ -95,7 +96,8 @@ class Ros2InferenceNode:
         )
         self.node.create_subscription(LaserScan, topics["lidar"], self._on_lidar, qos)
         self.node.create_subscription(Odometry, topics["odom"], self._on_odom, qos)
-        self.node.create_subscription(Path, topics["local_route"], self._on_route, qos)
+        if self.use_route:
+            self.node.create_subscription(Path, topics["local_route"], self._on_route, qos)
         self.steering_pub = self.node.create_publisher(Float32, topics["steering_cmd"], qos)
         self.speed_pub = self.node.create_publisher(Float32, topics["speed_cmd"], qos)
         self.waypoints_pub = self.node.create_publisher(Float32MultiArray, topics["waypoints"], qos)
@@ -144,6 +146,8 @@ class Ros2InferenceNode:
         self.last_stamp_s = self._stamp_to_seconds(msg.header.stamp)
 
     def _on_route(self, msg) -> None:
+        if not self.use_route:
+            return
         route = np.zeros((self.route_points, 2), dtype=np.float32)
         for idx, pose_stamped in enumerate(msg.poses[: self.route_points]):
             route[idx] = [pose_stamped.pose.position.x, pose_stamped.pose.position.y]
