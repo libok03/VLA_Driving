@@ -11,7 +11,7 @@ HELP = """
 ROS2 Xycar teleop
 
 keys:
-  w / s : full speed / stop
+  w / s : speed 10 / stop
   k / l : speed 10 / speed 20
   a / d : steer left / steer right
   x     : center steering
@@ -91,7 +91,7 @@ def main() -> None:
                 if key == "q":
                     break
                 if key == "w":
-                    speed = args.max_speed
+                    speed = args.low_speed
                 elif key == "s":
                     speed = 0.0
                 elif key == "k":
