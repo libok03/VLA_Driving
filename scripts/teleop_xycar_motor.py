@@ -113,13 +113,19 @@ def main() -> None:
                 pub.publish(msg)
                 print(f"\rangle={angle:6.2f} speed={speed:6.2f}", end="", flush=True)
                 rclpy.spin_once(node, timeout_sec=0.0)
+    except KeyboardInterrupt:
+        pass
     finally:
-        stop_msg = msg_cls()
-        assign_field(stop_msg, ("angle", "steering", "steer"), 0.0)
-        assign_field(stop_msg, ("speed", "velocity", "throttle"), 0.0)
-        pub.publish(stop_msg)
+        try:
+            stop_msg = msg_cls()
+            assign_field(stop_msg, ("angle", "steering", "steer"), 0.0)
+            assign_field(stop_msg, ("speed", "velocity", "throttle"), 0.0)
+            pub.publish(stop_msg)
+        except Exception:
+            pass
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
         print("\nstopped")
 
 
