@@ -13,7 +13,7 @@ ROS2 Xycar teleop
 keys:
   w / s : full speed / stop
   k / l : speed 10 / speed 15
-  a / d : full left / full right
+  a / d : steer left / steer right
   x     : center steering
   space : stop speed
   q     : quit
@@ -60,9 +60,12 @@ def main() -> None:
     parser.add_argument("--msg-type", default="xycar_msgs/msg/XycarMotor")
     parser.add_argument("--rate", type=float, default=50.0)
     parser.add_argument("--max-speed", type=float, default=15.0)
-    parser.add_argument("--max-angle", type=float, default=100.0)
+    parser.add_argument("--max-angle", type=float, default=70.0)
+    parser.add_argument("--steer-step", type=float, default=8.0)
+    parser.add_argument("--center-step", type=float, default=4.0)
     parser.add_argument("--low-speed", type=float, default=10.0)
     parser.add_argument("--high-speed", type=float, default=15.0)
+    parser.add_argument("--no-auto-center", action="store_true")
     args = parser.parse_args()
 
     try:
@@ -96,15 +99,18 @@ def main() -> None:
                 elif key == "l":
                     speed = args.high_speed
                 elif key == "a":
-                    angle = -args.max_angle
+                    angle -= args.steer_step
                 elif key == "d":
-                    angle = args.max_angle
+                    angle += args.steer_step
                 elif key == "x":
                     angle = 0.0
                 elif key == " ":
                     speed = 0.0
-                else:
-                    angle = 0.0
+                elif not args.no_auto_center:
+                    if angle > 0.0:
+                        angle = max(0.0, angle - args.center_step)
+                    elif angle < 0.0:
+                        angle = min(0.0, angle + args.center_step)
 
                 speed = clamp(speed, 0.0, args.max_speed)
                 angle = clamp(angle, -args.max_angle, args.max_angle)
