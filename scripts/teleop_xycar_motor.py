@@ -60,7 +60,7 @@ def main() -> None:
     parser.add_argument("--msg-type", default="xycar_msgs/msg/XycarMotor")
     parser.add_argument("--rate", type=float, default=80.0)
     parser.add_argument("--max-speed", type=float, default=15.0)
-    parser.add_argument("--max-angle", type=float, default=70.0)
+    parser.add_argument("--max-angle", type=float, default=100.0)
     parser.add_argument("--steer-step", type=float, default=16.0)
     parser.add_argument("--center-step", type=float, default=8.0)
     parser.add_argument("--low-speed", type=float, default=10.0)
