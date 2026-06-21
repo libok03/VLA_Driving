@@ -2,9 +2,9 @@ seed: 7
 device: auto
 
 data:
-  data_root: data/sample
-  train_manifest: data/sample/train.jsonl
-  val_manifest: data/sample/val.jsonl
+  data_root: data/vla_15laps
+  train_manifest: data/vla_15laps/train.jsonl
+  val_manifest: data/vla_15laps/val.jsonl
   image_size: [160, 320]
   perception_dim: 32
   lidar_size: 360
@@ -30,8 +30,8 @@ train:
   epochs: 20
   lr: 0.0003
   weight_decay: 0.0001
-  num_workers: 2
-  checkpoint_dir: checkpoints
+  num_workers: 0
+  checkpoint_dir: checkpoints/vla_15laps
 
 control:
   wheel_base: 0.32

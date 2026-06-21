@@ -8,8 +8,8 @@ from torch import nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from vla_driving.data.driving_dataset import DrivingDataset
-from vla_driving.models.lightweight_transfuser import LightweightTransFuser
+from vla_driving.data.lane_steering_dataset import LaneSteeringDataset
+from vla_driving.models.lane_steering import LaneSteeringMLP
 from vla_driving.utils.config import load_config
 
 
@@ -19,40 +19,34 @@ def resolve_device(name: str) -> torch.device:
     return torch.device(name)
 
 
-def build_dataset(cfg: dict, split: str) -> DrivingDataset:
+def build_dataset(cfg: dict, split: str, max_samples: int = 0) -> LaneSteeringDataset:
     data_cfg = cfg["data"]
+    label_cfg = cfg["labels"]
     manifest_key = "train_manifest" if split == "train" else "val_manifest"
-    return DrivingDataset(
+    return LaneSteeringDataset(
         data_root=data_cfg["data_root"],
         manifest_path=data_cfg[manifest_key],
-        image_size=tuple(data_cfg["image_size"]),
         perception_dim=data_cfg["perception_dim"],
         lidar_size=data_cfg["lidar_size"],
-        route_points=data_cfg["route_points"],
-        waypoint_count=data_cfg["waypoint_count"],
-        waypoint_dim=data_cfg.get("waypoint_dim", 2),
-        use_route=bool(data_cfg.get("use_route", True)),
+        steering_gain=label_cfg["steering_gain"],
+        steering_limit=label_cfg["steering_limit"],
+        near_waypoint_index=label_cfg.get("near_waypoint_index", 0),
+        far_waypoint_index=label_cfg.get("far_waypoint_index", 4),
+        lidar_max_range=data_cfg.get("lidar_max_range", 10.0),
+        max_samples=max_samples,
     )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/base.yaml")
-    parser.add_argument("--data-root", default="")
-    parser.add_argument("--train-manifest", default="")
-    parser.add_argument("--val-manifest", default="")
+    parser = argparse.ArgumentParser(description="Train a tiny direct lane steering model.")
+    parser.add_argument("--config", default="configs/lane_steering.yaml")
+    parser.add_argument("--overfit-samples", type=int, default=0)
     args = parser.parse_args()
-    cfg = load_config(args.config)
-    if args.data_root:
-        cfg["data"]["data_root"] = args.data_root
-    if args.train_manifest:
-        cfg["data"]["train_manifest"] = args.train_manifest
-    if args.val_manifest:
-        cfg["data"]["val_manifest"] = args.val_manifest
 
+    cfg = load_config(args.config)
     torch.manual_seed(cfg["seed"])
     device = resolve_device(cfg["device"])
-    model = LightweightTransFuser(**cfg["model"]).to(device)
+    model = LaneSteeringMLP(**cfg["model"]).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=cfg["train"]["lr"],
@@ -60,14 +54,16 @@ def main() -> None:
     )
     loss_fn = nn.SmoothL1Loss()
 
+    train_dataset = build_dataset(cfg, "train", max_samples=args.overfit_samples)
+    val_dataset = build_dataset(cfg, "val")
     train_loader = DataLoader(
-        build_dataset(cfg, "train"),
-        batch_size=cfg["train"]["batch_size"],
+        train_dataset,
+        batch_size=min(cfg["train"]["batch_size"], max(len(train_dataset), 1)),
         shuffle=True,
         num_workers=cfg["train"]["num_workers"],
     )
     val_loader = DataLoader(
-        build_dataset(cfg, "val"),
+        val_dataset,
         batch_size=cfg["train"]["batch_size"],
         shuffle=False,
         num_workers=cfg["train"]["num_workers"],
@@ -91,7 +87,7 @@ def main() -> None:
 
 
 def run_epoch(
-    model: LightweightTransFuser,
+    model: LaneSteeringMLP,
     loader: DataLoader,
     loss_fn: nn.Module,
     device: torch.device,
@@ -101,12 +97,10 @@ def run_epoch(
     total_count = 0
     for batch in tqdm(loader, leave=False):
         perception = batch["perception"].to(device)
-        lidar = batch["lidar"].to(device)
-        pose = batch["pose"].to(device)
-        route = batch["route"].to(device)
-        target = batch["waypoints"].to(device)
+        lidar_summary = batch["lidar_summary"].to(device)
+        target = batch["steering"].to(device)
 
-        pred = model(perception, lidar, pose, route)
+        pred = model(perception, lidar_summary)
         loss = loss_fn(pred, target)
         if optimizer is not None:
             optimizer.zero_grad(set_to_none=True)

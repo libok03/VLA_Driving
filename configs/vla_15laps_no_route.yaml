@@ -2,13 +2,14 @@ seed: 7
 device: auto
 
 data:
-  data_root: data/sample
-  train_manifest: data/sample/train.jsonl
-  val_manifest: data/sample/val.jsonl
+  data_root: data/vla_15laps
+  train_manifest: data/vla_15laps/train.jsonl
+  val_manifest: data/vla_15laps/val.jsonl
   image_size: [160, 320]
   perception_dim: 32
   lidar_size: 360
   route_points: 10
+  use_route: false
   waypoint_count: 5
   waypoint_dim: 3
 
@@ -30,22 +31,24 @@ train:
   epochs: 20
   lr: 0.0003
   weight_decay: 0.0001
-  num_workers: 2
-  checkpoint_dir: checkpoints
+  num_workers: 0
+  checkpoint_dir: checkpoints/vla_15laps_no_route
 
 control:
   wheel_base: 0.32
   lookahead_distance: 1.5
   max_steer_rad: 0.6
-  steering_mode: pure_pursuit
-  lateral_waypoint_index: 2
-  lateral_angle_gain: 80.0
+  steering_mode: lateral_delta
+  lateral_reference_index: 0
+  lateral_waypoint_index: 4
+  lateral_angle_gain: -120.0
+  waypoints_frame: base_link
   motor_enabled: true
   motor_topic: /xycar_motor
   motor_msg_type: xycar_msgs/msg/XycarMotor
-  motor_angle_gain: 83.3333333333
+  motor_angle_gain: 1.0
   motor_max_angle: 50.0
-  fixed_speed: 18.0
+  fixed_speed: 10.0
   motor_speed_gain: 1.0
   motor_min_speed: 0.0
   motor_max_speed: 20.0

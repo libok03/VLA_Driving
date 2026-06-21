@@ -5,11 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "vla-driving"
 version = "0.1.0"
-description = "Lightweight image, 2D LiDAR, and pose fusion model for fixed-route driving."
+description = "Lightweight perception, 2D LiDAR, and pose fusion model for fixed-route driving."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "numpy>=1.24",
+  "opencv-python>=4.8",
   "Pillow>=10.0",
   "PyYAML>=6.0",
   "torch>=2.1",
@@ -19,6 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.5"]
+yolo = ["ultralytics>=8.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

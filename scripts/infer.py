@@ -7,13 +7,12 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from PIL import Image as PILImage
-from torchvision import transforms
-
 from vla_driving.control.pure_pursuit import PurePursuitController
 from vla_driving.models.lightweight_transfuser import LightweightTransFuser
+from vla_driving.perception import PerceptionExtractor
 from vla_driving.planning.lap_counter import LapCounter
 from vla_driving.utils.config import load_config
+from vla_driving.utils.geometry import wrap_angle
 
 
 class Ros2InferenceNode:
@@ -22,7 +21,9 @@ class Ros2InferenceNode:
         from rclpy.node import Node
         from sensor_msgs.msg import Image, LaserScan
         from nav_msgs.msg import Odometry, Path
+        from geometry_msgs.msg import PoseStamped
         from std_msgs.msg import Float32, Float32MultiArray
+        from rosidl_runtime_py.utilities import get_message
 
         class _Node(Node):
             pass
@@ -33,6 +34,7 @@ class Ros2InferenceNode:
             "LaserScan": LaserScan,
             "Odometry": Odometry,
             "Path": Path,
+            "PoseStamped": PoseStamped,
             "Float32": Float32,
             "Float32MultiArray": Float32MultiArray,
         }
@@ -47,14 +49,30 @@ class Ros2InferenceNode:
         data_cfg = cfg["data"]
         self.lidar_size = data_cfg["lidar_size"]
         self.route_points = data_cfg["route_points"]
-        self.image_transform = transforms.Compose(
-            [
-                transforms.Resize(tuple(data_cfg["image_size"])),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
-            ]
+        self.use_route = bool(data_cfg.get("use_route", True))
+        perception_cfg = dict(cfg["ros2"].get("perception", {}))
+        perception_cfg["dim"] = data_cfg["perception_dim"]
+        self.perception_extractor = PerceptionExtractor(perception_cfg, dim=data_cfg["perception_dim"])
+        control_cfg = cfg["control"]
+        self.controller = PurePursuitController(
+            wheel_base=float(control_cfg.get("wheel_base", 0.32)),
+            lookahead_distance=float(control_cfg.get("lookahead_distance", 1.5)),
+            max_steer_rad=float(control_cfg.get("max_steer_rad", 0.6)),
         )
-        self.controller = PurePursuitController(**cfg["control"])
+        self.motor_enabled = bool(control_cfg.get("motor_enabled", False))
+        self.steering_mode = str(control_cfg.get("steering_mode", "pure_pursuit"))
+        self.lateral_reference_index = int(control_cfg.get("lateral_reference_index", 0))
+        self.lateral_waypoint_index = int(control_cfg.get("lateral_waypoint_index", 2))
+        self.lateral_angle_gain = float(control_cfg.get("lateral_angle_gain", 80.0))
+        self.waypoints_frame = str(control_cfg.get("waypoints_frame", "base_link"))
+        self.motor_angle_gain = float(control_cfg.get("motor_angle_gain", 1.0))
+        self.motor_max_angle = float(control_cfg.get("motor_max_angle", 1.0))
+        self.motor_speed_gain = float(control_cfg.get("motor_speed_gain", 1.0))
+        self.motor_min_speed = float(control_cfg.get("motor_min_speed", 0.0))
+        self.motor_max_speed = float(control_cfg.get("motor_max_speed", 1.0))
+        fixed_speed = control_cfg.get("fixed_speed")
+        self.fixed_speed = None if fixed_speed is None else float(fixed_speed)
+        self.motor_msg_type = control_cfg.get("motor_msg_type", "xycar_msgs/msg/XycarMotor")
         route_cfg = cfg["route"]
         self.lap_counter = LapCounter(
             gate_a=tuple(route_cfg["finish_gate_a"]),
@@ -63,25 +81,49 @@ class Ros2InferenceNode:
             total_laps=route_cfg["total_laps"],
             cooldown_s=route_cfg["lap_cooldown_s"],
             arm_distance_m=route_cfg["lap_arm_distance_m"],
+            trigger_mode=route_cfg.get("lap_trigger_mode", "gate"),
+            trigger_center=route_cfg.get("lap_trigger_center"),
+            trigger_radius_m=route_cfg.get("lap_trigger_radius_m", 3.0),
         )
 
-        self.image_tensor: torch.Tensor | None = None
+        self.perception_tensor: torch.Tensor | None = None
         self.lidar_tensor: torch.Tensor | None = None
         self.pose: tuple[float, float, float] | None = None
+        self.odom_yaw_offset = float(cfg.get("ros2", {}).get("odom_yaw_offset", 0.0))
         self.route = np.zeros((self.route_points, 2), dtype=np.float32)
-        self.shortcut_allowed_laps = set(int(v) for v in route_cfg.get("shortcut_allowed_laps", []))
         self.last_stamp_s = 0.0
         self.recent_waypoints: deque[np.ndarray] = deque(maxlen=3)
 
         topics = cfg["ros2"]["topics"]
         qos = int(cfg["ros2"].get("qos_depth", 10))
         self.node.create_subscription(Image, topics["image"], self._on_image, qos)
+        self.node.create_subscription(
+            Float32MultiArray,
+            topics.get("perception_features", "/vla_driving/perception_features"),
+            self._on_perception_features,
+            qos,
+        )
         self.node.create_subscription(LaserScan, topics["lidar"], self._on_lidar, qos)
         self.node.create_subscription(Odometry, topics["odom"], self._on_odom, qos)
-        self.node.create_subscription(Path, topics["local_route"], self._on_route, qos)
+        if self.use_route:
+            self.node.create_subscription(Path, topics["local_route"], self._on_route, qos)
         self.steering_pub = self.node.create_publisher(Float32, topics["steering_cmd"], qos)
         self.speed_pub = self.node.create_publisher(Float32, topics["speed_cmd"], qos)
         self.waypoints_pub = self.node.create_publisher(Float32MultiArray, topics["waypoints"], qos)
+        self.waypoints_path_pub = self.node.create_publisher(
+            Path,
+            topics.get("waypoints_path", "/vla_driving/waypoints_path"),
+            qos,
+        )
+        self.motor_pub = None
+        self.motor_msg_cls = None
+        if self.motor_enabled:
+            self.motor_msg_cls = get_message(str(self.motor_msg_type))
+            self.motor_pub = self.node.create_publisher(
+                self.motor_msg_cls,
+                control_cfg.get("motor_topic", topics.get("motor_cmd", "/xycar_motor")),
+                qos,
+            )
         period = 1.0 / float(cfg["ros2"].get("inference_hz", 10.0))
         self.node.create_timer(period, self._tick)
 
@@ -90,8 +132,14 @@ class Ros2InferenceNode:
         self.node.destroy_node()
 
     def _on_image(self, msg) -> None:
-        self.image_tensor = self._image_msg_to_tensor(msg)
+        self.perception_tensor = self._image_msg_to_perception(msg)
         self.last_stamp_s = self._stamp_to_seconds(msg.header.stamp)
+
+    def _on_perception_features(self, msg) -> None:
+        values = np.asarray(msg.data, dtype=np.float32)
+        fitted = np.zeros(self.cfg["data"]["perception_dim"], dtype=np.float32)
+        fitted[: min(fitted.shape[0], values.shape[0])] = values[: fitted.shape[0]]
+        self.perception_tensor = torch.from_numpy(fitted).unsqueeze(0).to(self.device)
 
     def _on_lidar(self, msg) -> None:
         ranges = np.asarray(msg.ranges, dtype=np.float32)
@@ -104,18 +152,23 @@ class Ros2InferenceNode:
     def _on_odom(self, msg) -> None:
         position = msg.pose.pose.position
         orientation = msg.pose.pose.orientation
-        yaw = self._yaw_from_quaternion(orientation.x, orientation.y, orientation.z, orientation.w)
+        yaw = wrap_angle(
+            self._yaw_from_quaternion(orientation.x, orientation.y, orientation.z, orientation.w)
+            + self.odom_yaw_offset
+        )
         self.pose = (float(position.x), float(position.y), yaw)
         self.last_stamp_s = self._stamp_to_seconds(msg.header.stamp)
 
     def _on_route(self, msg) -> None:
+        if not self.use_route:
+            return
         route = np.zeros((self.route_points, 2), dtype=np.float32)
         for idx, pose_stamped in enumerate(msg.poses[: self.route_points]):
             route[idx] = [pose_stamped.pose.position.x, pose_stamped.pose.position.y]
         self.route = route
 
     def _tick(self) -> None:
-        if self.image_tensor is None or self.lidar_tensor is None or self.pose is None:
+        if self.perception_tensor is None or self.lidar_tensor is None or self.pose is None:
             return
 
         x, y, yaw = self.pose
@@ -125,22 +178,21 @@ class Ros2InferenceNode:
             yaw=yaw,
             timestamp_s=self.last_stamp_s,
         )
-        route_mode_id = self._route_mode_for_lap(lap_state.lap_count)
         state = torch.tensor(
-            [[x, y, yaw, route_mode_id]],
+            [[x, y, yaw, float(lap_state.lap_count)]],
             dtype=torch.float32,
             device=self.device,
         )
         route = torch.from_numpy(self.route).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
-            waypoints = self.model(self.image_tensor, self.lidar_tensor, state, route)[0].cpu().numpy()
+            waypoints = self.model(self.perception_tensor, self.lidar_tensor, state, route)[0].cpu().numpy()
         if self.recent_waypoints:
             waypoints = 0.7 * waypoints + 0.3 * np.mean(np.stack(self.recent_waypoints), axis=0)
         self.recent_waypoints.append(waypoints)
 
-        steering = 0.0 if lap_state.finished else self.controller.steer_from_waypoints(waypoints)
-        speed = 0.0 if lap_state.finished else self._speed_from_waypoints(waypoints)
+        steering = 0.0 if lap_state.finished else self._steer_from_waypoints(waypoints)
+        speed = 0.0 if lap_state.finished else self._target_speed(waypoints)
         self._publish(steering, speed, waypoints)
 
     def _publish(self, steering: float, speed: float, waypoints: np.ndarray) -> None:
@@ -153,12 +205,55 @@ class Ros2InferenceNode:
         speed_msg = Float32()
         speed_msg.data = float(speed)
         self.speed_pub.publish(speed_msg)
+        self._publish_motor(steering, speed)
 
         waypoints_msg = Float32MultiArray()
         waypoints_msg.data = waypoints.astype(np.float32).reshape(-1).tolist()
         self.waypoints_pub.publish(waypoints_msg)
+        self._publish_waypoints_path(waypoints)
 
-    def _image_msg_to_tensor(self, msg) -> torch.Tensor:
+    def _publish_waypoints_path(self, waypoints: np.ndarray) -> None:
+        Path = self.msg_types["Path"]
+        PoseStamped = self.msg_types["PoseStamped"]
+        path_msg = Path()
+        path_msg.header.stamp = self.node.get_clock().now().to_msg()
+        path_msg.header.frame_id = self.waypoints_frame
+        for waypoint in waypoints:
+            pose = PoseStamped()
+            pose.header = path_msg.header
+            pose.pose.position.x = float(waypoint[0])
+            pose.pose.position.y = float(waypoint[1])
+            pose.pose.position.z = 0.0
+            pose.pose.orientation.w = 1.0
+            path_msg.poses.append(pose)
+        self.waypoints_path_pub.publish(path_msg)
+
+    def _publish_motor(self, steering: float, speed: float) -> None:
+        if self.motor_pub is None or self.motor_msg_cls is None:
+            return
+        msg = self.motor_msg_cls()
+        if self.steering_mode in {"lateral", "lateral_delta"}:
+            angle_cmd = float(np.clip(steering, -self.motor_max_angle, self.motor_max_angle))
+        else:
+            angle_cmd = float(np.clip(steering * self.motor_angle_gain, -self.motor_max_angle, self.motor_max_angle))
+        speed_cmd = float(np.clip(speed * self.motor_speed_gain, self.motor_min_speed, self.motor_max_speed))
+        self._assign_motor_field(msg, ("angle", "steering", "steer"), angle_cmd)
+        self._assign_motor_field(msg, ("speed", "velocity", "throttle"), speed_cmd)
+        self.motor_pub.publish(msg)
+
+    @staticmethod
+    def _assign_motor_field(msg, names: tuple[str, ...], value: float) -> None:
+        for name in names:
+            if not hasattr(msg, name):
+                continue
+            current = getattr(msg, name)
+            if isinstance(current, int):
+                setattr(msg, name, int(round(value)))
+            else:
+                setattr(msg, name, type(current)(value))
+            return
+
+    def _image_msg_to_perception(self, msg) -> torch.Tensor:
         channels = self._channels_for_encoding(msg.encoding)
         array = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.step)
         image = array[:, : msg.width * channels].reshape(msg.height, msg.width, channels)
@@ -166,8 +261,8 @@ class Ros2InferenceNode:
             image = image[:, :, ::-1].copy()
         if channels == 1:
             image = np.repeat(image, 3, axis=2)
-        pil_image = PILImage.fromarray(image.astype(np.uint8), mode="RGB")
-        return self.image_transform(pil_image).unsqueeze(0).to(self.device)
+        features = self.perception_extractor.extract(image.astype(np.uint8))
+        return torch.from_numpy(features).unsqueeze(0).to(self.device)
 
     @staticmethod
     def _channels_for_encoding(encoding: str) -> int:
@@ -188,14 +283,28 @@ class Ros2InferenceNode:
     def _stamp_to_seconds(stamp) -> float:
         return float(stamp.sec) + float(stamp.nanosec) * 1e-9
 
-    def _route_mode_for_lap(self, lap_count: int) -> float:
-        return 1.0 if lap_count in self.shortcut_allowed_laps else 0.0
-
     @staticmethod
     def _speed_from_waypoints(waypoints: np.ndarray) -> float:
         if waypoints.shape[1] < 3:
             return 0.0
         return float(max(waypoints[0, 2], 0.0))
+
+    def _target_speed(self, waypoints: np.ndarray) -> float:
+        if self.fixed_speed is not None:
+            return self.fixed_speed
+        return self._speed_from_waypoints(waypoints)
+
+    def _steer_from_waypoints(self, waypoints: np.ndarray) -> float:
+        if self.steering_mode in {"lateral", "lateral_delta"}:
+            if waypoints.size == 0:
+                return 0.0
+            idx = int(np.clip(self.lateral_waypoint_index, 0, waypoints.shape[0] - 1))
+            lateral_y = float(waypoints[idx, 1])
+            if self.steering_mode == "lateral_delta":
+                ref_idx = int(np.clip(self.lateral_reference_index, 0, waypoints.shape[0] - 1))
+                lateral_y -= float(waypoints[ref_idx, 1])
+            return lateral_y * self.lateral_angle_gain
+        return self.controller.steer_from_waypoints(waypoints)
 
     @staticmethod
     def _resolve_device(name: str) -> torch.device:
