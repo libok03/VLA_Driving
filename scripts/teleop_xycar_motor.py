@@ -61,7 +61,7 @@ def main() -> None:
     parser.add_argument("--rate", type=float, default=80.0)
     parser.add_argument("--max-speed", type=float, default=20.0)
     parser.add_argument("--max-angle", type=float, default=100.0)
-    parser.add_argument("--steer-step", type=float, default=50.0)
+    parser.add_argument("--steer-step", type=float, default=80.0)
     parser.add_argument("--center-step", type=float, default=3.0)
     parser.add_argument("--low-speed", type=float, default=10.0)
     parser.add_argument("--high-speed", type=float, default=20.0)
