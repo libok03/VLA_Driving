@@ -1,140 +1,129 @@
-from __future__ import annotations
-
-import argparse
 import select
 import sys
 import termios
 import tty
 
+import rclpy
+from rclpy.node import Node
+from xycar_msgs.msg import XycarMotor
+
 
 HELP = """
-ROS2 Xycar teleop
+Xycar Step Steering Teleop Control (Auto-Center on Accel/Brake)
+---------------------------------------------------------------
+w : speed stage up & center steering   (0 -> 10 -> 20 -> 30 km/h)
+s : speed stage down & center steering (30 -> 20 -> 10 -> 0 km/h)
 
-keys:
-  w / s : speed 10 / stop
-  k / l : speed 10 / speed 20
-  a / d : steer left / steer right
-  x     : center steering
-  space : stop speed
-  q     : quit
+a : steering stage left  ( 100 ->   0 -> -100 deg)
+d : steering stage right (-100 ->   0 ->  100 deg)
+
+Steering does not auto-center while idle.
+Pressing w or s centers steering immediately.
+
+spacebar : immediate stop and center steering
+CTRL-C   : quit
 """
 
 
-class RawTerminal:
-    def __enter__(self):
-        self.fd = sys.stdin.fileno()
-        self.old_settings = termios.tcgetattr(self.fd)
-        tty.setcbreak(self.fd)
-        return self
+class XycarStepSteerTeleop(Node):
+    def __init__(self):
+        super().__init__("xycar_step_steer_teleop_node")
+        self.publisher_ = self.create_publisher(XycarMotor, "/xycar_motor", 10)
 
-    def __exit__(self, exc_type, exc, tb) -> None:
-        termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old_settings)
+        self.speed_stages = [0.0, 10.0, 20.0, 30.0]
+        self.current_speed_idx = 0
 
+        self.angle_stages = [-100.0, 0.0, 100.0]
+        self.current_angle_idx = 1
 
-def read_key(timeout_s: float) -> str:
-    readable, _, _ = select.select([sys.stdin], [], [], timeout_s)
-    if not readable:
-        return ""
-    return sys.stdin.read(1)
+        self.scale_factor = 2.0
+        self.settings = termios.tcgetattr(sys.stdin)
 
-
-def clamp(value: float, low: float, high: float) -> float:
-    return max(low, min(high, value))
-
-
-def assign_field(msg, names: tuple[str, ...], value: float) -> None:
-    for name in names:
-        if not hasattr(msg, name):
-            continue
-        current = getattr(msg, name)
-        if isinstance(current, int):
-            setattr(msg, name, int(round(value)))
+    def get_key(self):
+        tty.setraw(sys.stdin.fileno())
+        rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
+        if rlist:
+            key = sys.stdin.read(1)
         else:
-            setattr(msg, name, type(current)(value))
-        return
+            key = ""
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.settings)
+        return key
 
+    def publish_motor(self, speed: float, angle: float) -> None:
+        motor_msg = XycarMotor()
+        motor_msg.header.stamp = self.get_clock().now().to_msg()
+        motor_msg.angle = float(angle)
+        motor_msg.speed = float(speed)
+        self.publisher_.publish(motor_msg)
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Keyboard teleop publisher for /xycar_motor.")
-    parser.add_argument("--topic", default="/xycar_motor")
-    parser.add_argument("--msg-type", default="xycar_msgs/msg/XycarMotor")
-    parser.add_argument("--rate", type=float, default=80.0)
-    parser.add_argument("--max-speed", type=float, default=20.0)
-    parser.add_argument("--max-angle", type=float, default=100.0)
-    parser.add_argument("--steer-step", type=float, default=80.0)
-    parser.add_argument("--center-step", type=float, default=3.0)
-    parser.add_argument("--low-speed", type=float, default=10.0)
-    parser.add_argument("--high-speed", type=float, default=20.0)
-    parser.add_argument("--no-auto-center", action="store_true")
-    args = parser.parse_args()
+    def run(self):
+        print(HELP)
+        print("publishing xycar_msgs/msg/XycarMotor on /xycar_motor")
+        last_key = ""
 
-    try:
-        import rclpy
-        from rosidl_runtime_py.utilities import get_message
-    except ImportError as exc:
-        raise SystemExit("ROS2 rclpy is required. Run inside a sourced ROS2 environment.") from exc
-
-    msg_cls = get_message(args.msg_type)
-    rclpy.init()
-    node = rclpy.create_node("xycar_keyboard_teleop")
-    pub = node.create_publisher(msg_cls, args.topic, 10)
-    period_s = 1.0 / max(args.rate, 1e-6)
-    speed = 0.0
-    angle = 0.0
-
-    print(HELP)
-    print(f"publishing {args.msg_type} on {args.topic}")
-    try:
-        with RawTerminal():
-            while rclpy.ok():
-                key = read_key(period_s)
-                if key == "q":
-                    break
-                if key == "w":
-                    speed = args.low_speed
-                elif key == "s":
-                    speed = 0.0
-                elif key == "k":
-                    speed = args.low_speed
-                elif key == "l":
-                    speed = args.high_speed
-                elif key == "a":
-                    angle -= args.steer_step
-                elif key == "d":
-                    angle += args.steer_step
-                elif key == "x":
-                    angle = 0.0
-                elif key == " ":
-                    speed = 0.0
-                elif not args.no_auto_center:
-                    if angle > 0.0:
-                        angle = max(0.0, angle - args.center_step)
-                    elif angle < 0.0:
-                        angle = min(0.0, angle + args.center_step)
-
-                speed = clamp(speed, 0.0, args.max_speed)
-                angle = clamp(angle, -args.max_angle, args.max_angle)
-
-                msg = msg_cls()
-                assign_field(msg, ("angle", "steering", "steer"), angle)
-                assign_field(msg, ("speed", "velocity", "throttle"), speed)
-                pub.publish(msg)
-                print(f"\rangle={angle:6.2f} speed={speed:6.2f}", end="", flush=True)
-                rclpy.spin_once(node, timeout_sec=0.0)
-    except KeyboardInterrupt:
-        pass
-    finally:
         try:
-            stop_msg = msg_cls()
-            assign_field(stop_msg, ("angle", "steering", "steer"), 0.0)
-            assign_field(stop_msg, ("speed", "velocity", "throttle"), 0.0)
-            pub.publish(stop_msg)
-        except Exception:
+            while rclpy.ok():
+                key = self.get_key()
+
+                if key == "\x03":
+                    break
+
+                if key == "w" and last_key != "w":
+                    if self.current_speed_idx < len(self.speed_stages) - 1:
+                        self.current_speed_idx += 1
+                    self.current_angle_idx = 1
+                elif key == "s" and last_key != "s":
+                    if self.current_speed_idx > 0:
+                        self.current_speed_idx -= 1
+                    self.current_angle_idx = 1
+
+                if key == "a" and last_key != "a":
+                    if self.current_angle_idx > 0:
+                        self.current_angle_idx -= 1
+                elif key == "d" and last_key != "d":
+                    if self.current_angle_idx < len(self.angle_stages) - 1:
+                        self.current_angle_idx += 1
+
+                if key in ["w", "s", "a", "d"]:
+                    last_key = key
+                elif key == "":
+                    last_key = ""
+
+                if key == " ":
+                    self.current_speed_idx = 0
+                    self.current_angle_idx = 1
+
+                target_kmh = self.speed_stages[self.current_speed_idx]
+                target_mps = target_kmh / 3.6
+                final_speed_cmd = target_mps * self.scale_factor
+                target_angle = self.angle_stages[self.current_angle_idx]
+
+                self.publish_motor(final_speed_cmd, target_angle)
+                print(
+                    f"Speed Stage: {self.current_speed_idx} ({target_kmh:2.0f} km/h) | "
+                    f"Angle Stage: {self.current_angle_idx} ({target_angle:6.1f} deg)",
+                    end="\r",
+                    flush=True,
+                )
+        except KeyboardInterrupt:
             pass
-        node.destroy_node()
+        finally:
+            try:
+                self.publish_motor(0.0, 0.0)
+            except Exception:
+                pass
+            print("\nStopped and exiting...")
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    teleop_node = XycarStepSteerTeleop()
+    try:
+        teleop_node.run()
+    finally:
+        teleop_node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
-        print("\nstopped")
 
 
 if __name__ == "__main__":
