@@ -57,6 +57,7 @@ ros2:
     image: /usb_cam/image_raw/front
     perception_features: /vla_driving/perception_features
     lidar: /scan
+    pose: /scan_odom_map
     steering_cmd: /vla_driving/steering
     speed_cmd: /vla_driving/speed
     motor_cmd: /xycar_motor
