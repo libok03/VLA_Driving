@@ -7,12 +7,14 @@ data:
   val_manifest: data/motor_combined_2026_06_23/val.jsonl
   perception_dim: 32
   lidar_size: 360
+  pose_dim: 3
   sequence_length: 5
   lidar_max_range: 10.0
 
 model:
   perception_dim: 32
   lidar_size: 360
+  pose_dim: 3
   hidden_dim: 256
   gru_layers: 2
   dropout: 0.1

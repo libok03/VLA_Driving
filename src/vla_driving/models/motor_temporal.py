@@ -11,6 +11,7 @@ class MotorTemporalGRU(nn.Module):
         self,
         perception_dim: int = 32,
         lidar_size: int = 360,
+        pose_dim: int = 0,
         hidden_dim: int = 256,
         gru_layers: int = 2,
         dropout: float = 0.1,
@@ -19,7 +20,7 @@ class MotorTemporalGRU(nn.Module):
     ) -> None:
         super().__init__()
         self.register_buffer("output_scale", torch.tensor([steering_scale, speed_scale], dtype=torch.float32))
-        input_dim = int(perception_dim) + int(lidar_size)
+        input_dim = int(perception_dim) + int(lidar_size) + int(pose_dim)
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(inplace=True),

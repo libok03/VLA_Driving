@@ -20,12 +20,14 @@ class MotorTemporalDataset(Dataset[dict[str, torch.Tensor]]):
         steering_limit: float,
         speed_limit: float,
         lidar_max_range: float = 10.0,
+        pose_dim: int = 0,
         max_samples: int = 0,
     ) -> None:
         self.data_root = Path(data_root)
         self.sequence_length = int(sequence_length)
         self.perception_dim = int(perception_dim)
         self.lidar_size = int(lidar_size)
+        self.pose_dim = int(pose_dim)
         self.steering_limit = float(steering_limit)
         self.speed_limit = float(speed_limit)
         self.lidar_max_range = float(lidar_max_range)
@@ -58,7 +60,8 @@ class MotorTemporalDataset(Dataset[dict[str, torch.Tensor]]):
         self,
         samples: list[dict[str, Any]],
     ) -> tuple[np.ndarray, np.ndarray, list[str]]:
-        features = np.zeros((len(samples), self.perception_dim + self.lidar_size), dtype=np.float32)
+        feature_dim = self.perception_dim + self.lidar_size + self.pose_dim
+        features = np.zeros((len(samples), feature_dim), dtype=np.float32)
         targets = np.zeros((len(samples), 2), dtype=np.float32)
         bag_keys: list[str] = []
 
@@ -68,11 +71,16 @@ class MotorTemporalDataset(Dataset[dict[str, torch.Tensor]]):
             lidar = self._fit_vector(lidar, self.lidar_size)
             lidar = np.nan_to_num(lidar, nan=0.0, posinf=0.0, neginf=0.0)
             lidar = np.clip(lidar, 0.0, self.lidar_max_range) / max(self.lidar_max_range, 1e-6)
+            pose = self._fit_vector(sample.get("pose", []), self.pose_dim)
             steering = float(np.clip(sample["steering"], -self.steering_limit, self.steering_limit))
             speed = float(np.clip(sample["speed"], 0.0, self.speed_limit))
 
             features[idx, : self.perception_dim] = perception
-            features[idx, self.perception_dim :] = lidar
+            lidar_start = self.perception_dim
+            lidar_end = lidar_start + self.lidar_size
+            features[idx, lidar_start:lidar_end] = lidar
+            if self.pose_dim > 0:
+                features[idx, lidar_end : lidar_end + self.pose_dim] = pose
             targets[idx] = [steering, speed]
             bag_keys.append(self._bag_key(str(sample["lidar"])))
 

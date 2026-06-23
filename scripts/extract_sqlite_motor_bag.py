@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sqlite3
 import struct
 from pathlib import Path
@@ -38,6 +39,12 @@ class CdrReader:
         self.align(4)
         value = struct.unpack_from(self.endian + "f", self.data, self.offset)[0]
         self.offset += 4
+        return float(value)
+
+    def f64(self) -> float:
+        self.align(8)
+        value = struct.unpack_from(self.endian + "d", self.data, self.offset)[0]
+        self.offset += 8
         return float(value)
 
     def string(self) -> str:
@@ -89,6 +96,47 @@ def parse_xycar_motor(data: bytes) -> tuple[float, float]:
     return angle, speed
 
 
+def yaw_from_quaternion(x: float, y: float, z: float, w: float) -> float:
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    return math.atan2(siny_cosp, cosy_cosp)
+
+
+def parse_pose_stamped(data: bytes) -> np.ndarray:
+    reader = CdrReader(data)
+    read_header(reader)
+    x = reader.f64()
+    y = reader.f64()
+    reader.f64()
+    qx = reader.f64()
+    qy = reader.f64()
+    qz = reader.f64()
+    qw = reader.f64()
+    return np.asarray([x, y, yaw_from_quaternion(qx, qy, qz, qw)], dtype=np.float32)
+
+
+def parse_odometry(data: bytes) -> np.ndarray:
+    reader = CdrReader(data)
+    read_header(reader)
+    reader.string()
+    x = reader.f64()
+    y = reader.f64()
+    reader.f64()
+    qx = reader.f64()
+    qy = reader.f64()
+    qz = reader.f64()
+    qw = reader.f64()
+    return np.asarray([x, y, yaw_from_quaternion(qx, qy, qz, qw)], dtype=np.float32)
+
+
+def parse_pose(data: bytes, topic_type: str) -> np.ndarray:
+    if topic_type == "nav_msgs/msg/Odometry":
+        return parse_odometry(data)
+    if topic_type in {"geometry_msgs/msg/PoseStamped", "geometry_msgs/msg/PoseWithCovarianceStamped"}:
+        return parse_pose_stamped(data)
+    raise ValueError(f"Unsupported pose topic type: {topic_type}")
+
+
 def fit_vector(values: Any, size: int) -> np.ndarray:
     values = np.asarray(values, dtype=np.float32)
     fitted = np.zeros(size, dtype=np.float32)
@@ -117,6 +165,7 @@ def extract_bag(
     perception_topic: str,
     lidar_topic: str,
     motor_topic: str,
+    pose_topic: str,
     perception_dim: int,
     lidar_size: int,
 ) -> int:
@@ -133,12 +182,15 @@ def extract_bag(
     lidar: np.ndarray | None = None
     steering: float | None = None
     speed: float | None = None
+    pose: np.ndarray | None = None
     next_sample_ns: int | None = None
     sample_index = 0
 
     con = sqlite3.connect(db_path)
     topics = topic_map(con)
     wanted = {perception_topic, lidar_topic, motor_topic}
+    if pose_topic:
+        wanted.add(pose_topic)
     query = """
         select topic_id, timestamp, data
         from messages
@@ -146,7 +198,7 @@ def extract_bag(
     """
     with manifest_path.open("a", encoding="utf-8") as manifest:
         for topic_id, timestamp_ns, raw in con.execute(query):
-            topic_name, _topic_type = topics[int(topic_id)]
+            topic_name, topic_type = topics[int(topic_id)]
             if topic_name not in wanted:
                 continue
             try:
@@ -156,6 +208,8 @@ def extract_bag(
                     lidar = fit_vector(parse_laser_scan(raw), lidar_size)
                 elif topic_name == motor_topic:
                     steering, speed = parse_xycar_motor(raw)
+                elif topic_name == pose_topic:
+                    pose = parse_pose(raw, topic_type)
             except Exception as exc:
                 raise RuntimeError(f"Failed to parse {topic_name} at {timestamp_ns} in {bag_dir}") from exc
 
@@ -164,6 +218,9 @@ def extract_bag(
             if int(timestamp_ns) < next_sample_ns:
                 continue
             if perception is None or lidar is None or steering is None or speed is None:
+                next_sample_ns = int(timestamp_ns) + period_ns
+                continue
+            if pose_topic and pose is None:
                 next_sample_ns = int(timestamp_ns) + period_ns
                 continue
 
@@ -177,6 +234,8 @@ def extract_bag(
                 "speed": float(speed),
                 "stamp": int(timestamp_ns) / 1_000_000_000.0,
             }
+            if pose_topic and pose is not None:
+                sample["pose"] = pose.astype(float).tolist()
             manifest.write(json.dumps(sample, separators=(",", ":")) + "\n")
             sample_index += 1
             next_sample_ns = int(timestamp_ns) + period_ns
@@ -192,6 +251,7 @@ def main() -> None:
     parser.add_argument("--perception-topic", default="/vla_driving/perception_features")
     parser.add_argument("--lidar-topic", default="/scan")
     parser.add_argument("--motor-topic", default="/xycar_motor")
+    parser.add_argument("--pose-topic", default="", help="Optional nav_msgs/Odometry or PoseStamped topic.")
     parser.add_argument("--perception-dim", type=int, default=32)
     parser.add_argument("--lidar-size", type=int, default=360)
     args = parser.parse_args()
@@ -205,6 +265,7 @@ def main() -> None:
         perception_topic=args.perception_topic,
         lidar_topic=args.lidar_topic,
         motor_topic=args.motor_topic,
+        pose_topic=args.pose_topic,
         perception_dim=args.perception_dim,
         lidar_size=args.lidar_size,
     )

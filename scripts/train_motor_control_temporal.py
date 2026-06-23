@@ -32,6 +32,7 @@ def build_dataset(cfg: dict, split: str, max_samples: int = 0) -> MotorTemporalD
         manifest_path=data_cfg[manifest_key],
         perception_dim=data_cfg["perception_dim"],
         lidar_size=data_cfg["lidar_size"],
+        pose_dim=data_cfg.get("pose_dim", 0),
         sequence_length=data_cfg["sequence_length"],
         steering_limit=label_cfg["steering_limit"],
         speed_limit=label_cfg["speed_limit"],
