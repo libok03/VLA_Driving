@@ -105,36 +105,51 @@ def yaw_from_quaternion(x: float, y: float, z: float, w: float) -> float:
 def parse_pose_stamped(data: bytes) -> np.ndarray:
     reader = CdrReader(data)
     read_header(reader)
-    x = reader.f64()
-    y = reader.f64()
-    reader.f64()
-    qx = reader.f64()
-    qy = reader.f64()
-    qz = reader.f64()
-    qw = reader.f64()
-    return np.asarray([x, y, yaw_from_quaternion(qx, qy, qz, qw)], dtype=np.float32)
+    return scan_pose_fields(reader.data, reader.endian, reader.offset)
 
 
 def parse_odometry(data: bytes) -> np.ndarray:
     reader = CdrReader(data)
     read_header(reader)
-    reader.string()
-    x = reader.f64()
-    y = reader.f64()
-    reader.f64()
-    qx = reader.f64()
-    qy = reader.f64()
-    qz = reader.f64()
-    qw = reader.f64()
-    return np.asarray([x, y, yaw_from_quaternion(qx, qy, qz, qw)], dtype=np.float32)
+    return scan_pose_fields(reader.data, reader.endian, reader.offset)
+
+
+def scan_pose_fields(data: bytes, endian: str, start_offset: int) -> np.ndarray:
+    best: tuple[float, np.ndarray] | None = None
+    for offset in range(start_offset, max(start_offset, len(data) - 56 + 1)):
+        if offset % 8 != 0:
+            continue
+        try:
+            x, y, z, qx, qy, qz, qw = struct.unpack_from(endian + "7d", data, offset)
+        except struct.error:
+            continue
+        values = np.asarray([x, y, z, qx, qy, qz, qw], dtype=np.float64)
+        if not np.isfinite(values).all():
+            continue
+        if max(abs(x), abs(y), abs(z)) > 100000.0:
+            continue
+        q_norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+        if not 0.5 <= q_norm <= 1.5:
+            continue
+        pose = np.asarray([x, y, yaw_from_quaternion(qx, qy, qz, qw)], dtype=np.float32)
+        score = abs(q_norm - 1.0) + 0.000001 * (abs(x) + abs(y) + abs(z))
+        if best is None or score < best[0]:
+            best = (score, pose)
+    if best is None:
+        raise ValueError("Could not find plausible pose fields in serialized message")
+    return best[1]
 
 
 def parse_pose(data: bytes, topic_type: str) -> np.ndarray:
     if topic_type == "nav_msgs/msg/Odometry":
-        return parse_odometry(data)
-    if topic_type in {"geometry_msgs/msg/PoseStamped", "geometry_msgs/msg/PoseWithCovarianceStamped"}:
-        return parse_pose_stamped(data)
-    raise ValueError(f"Unsupported pose topic type: {topic_type}")
+        pose = parse_odometry(data)
+    elif topic_type in {"geometry_msgs/msg/PoseStamped", "geometry_msgs/msg/PoseWithCovarianceStamped"}:
+        pose = parse_pose_stamped(data)
+    else:
+        raise ValueError(f"Unsupported pose topic type: {topic_type}")
+    if not np.isfinite(pose).all() or np.max(np.abs(pose[:2])) > 100000.0:
+        raise ValueError(f"Invalid pose values: {pose.tolist()}")
+    return pose.astype(np.float32)
 
 
 def fit_vector(values: Any, size: int) -> np.ndarray:
