@@ -7,7 +7,9 @@ import sys
 import numpy as np
 from tqdm import tqdm
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from scripts.train_motor_control import build_dataset
 from vla_driving.utils.config import load_config
