@@ -117,8 +117,6 @@ def parse_odometry(data: bytes) -> np.ndarray:
 def scan_pose_fields(data: bytes, endian: str, start_offset: int) -> np.ndarray:
     best: tuple[float, np.ndarray] | None = None
     for offset in range(start_offset, max(start_offset, len(data) - 56 + 1)):
-        if offset % 8 != 0:
-            continue
         try:
             x, y, z, qx, qy, qz, qw = struct.unpack_from(endian + "7d", data, offset)
         except struct.error:
