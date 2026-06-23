@@ -31,6 +31,7 @@ class Ros2BagExtractor:
         future_step_s: float,
         generate_route_from_odom: bool,
         route_step_s: float,
+        require_motor_label: bool,
     ) -> None:
         self.cfg = cfg
         self.bag_path = Path(bag_path)
@@ -47,6 +48,7 @@ class Ros2BagExtractor:
         self.future_step_ns = int(future_step_s * 1_000_000_000)
         self.generate_route_from_odom = generate_route_from_odom
         self.route_step_ns = int(route_step_s * 1_000_000_000)
+        self.require_motor_label = require_motor_label
         self.odom_yaw_offset = float(cfg.get("ros2", {}).get("odom_yaw_offset", 0.0))
 
         data_cfg = cfg["data"]
@@ -83,6 +85,8 @@ class Ros2BagExtractor:
         self.route = np.zeros((self.route_points, 2), dtype=np.float32)
         self.lap_index = 0
         self.future_waypoints: np.ndarray | None = None
+        self.motor_steering: float | None = None
+        self.motor_speed: float | None = None
         self.odom_trajectory: list[tuple[int, float, float, float]] = []
         self.odom_times: list[int] = []
         self.next_sample_time_ns: int | None = None
@@ -192,11 +196,16 @@ class Ros2BagExtractor:
             self.route = route
         elif topic == self.topics.get("future_waypoints"):
             self.future_waypoints = self._fit_waypoints(msg.data)
+        elif topic == self.topics.get("motor_cmd"):
+            self.motor_steering = self._read_first_field(msg, ("angle", "steering", "steer"))
+            self.motor_speed = self._read_first_field(msg, ("speed", "velocity", "throttle"))
 
     def _has_required_state(self) -> bool:
         if not self.has_perception or self.pose is None or not self.has_lidar:
             return False
         if self.require_waypoints and self.future_waypoints is None:
+            return False
+        if self.require_motor_label and (self.motor_steering is None or self.motor_speed is None):
             return False
         return True
 
@@ -236,11 +245,22 @@ class Ros2BagExtractor:
             sample["image"] = image_relpath
         if future_waypoints is not None:
             sample["future_waypoints"] = future_waypoints.astype(float).tolist()
+        if self.motor_steering is not None:
+            sample["steering"] = float(self.motor_steering)
+        if self.motor_speed is not None:
+            sample["speed"] = float(self.motor_speed)
 
         with self.manifest_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(sample, separators=(",", ":")) + "\n")
 
         self.sample_index += 1
+
+    @staticmethod
+    def _read_first_field(msg: Any, names: tuple[str, ...]) -> float | None:
+        for name in names:
+            if hasattr(msg, name):
+                return float(getattr(msg, name))
+        return None
 
     def _fit_lidar(self, ranges: Any) -> np.ndarray:
         values = np.asarray(ranges, dtype=np.float32)
@@ -401,6 +421,11 @@ def main() -> None:
         default=0.2,
         help="Time spacing, in seconds, between generated local route points.",
     )
+    parser.add_argument(
+        "--require-motor-label",
+        action="store_true",
+        help="Only write samples after a motor command label has been received.",
+    )
     args = parser.parse_args()
 
     if args.sample_hz <= 0.0:
@@ -432,6 +457,7 @@ def main() -> None:
         future_step_s=args.future_step_s,
         generate_route_from_odom=args.generate_route_from_odom,
         route_step_s=args.route_step_s,
+        require_motor_label=args.require_motor_label,
     ).run()
     print(f"Wrote {count} samples to {args.output_dir}")
 
