@@ -1,0 +1,62 @@
+seed: 7
+device: auto
+
+data:
+  data_root: data/motor_combined_2026_06_23
+  train_manifest: data/motor_combined_2026_06_23/train.jsonl
+  val_manifest: data/motor_combined_2026_06_23/val.jsonl
+  perception_dim: 32
+  lidar_size: 360
+  use_lidar_summary: false
+  lidar_max_range: 10.0
+
+model:
+  type: attention
+  perception_dim: 32
+  lidar_size: 360
+  token_dim: 64
+  num_heads: 4
+  num_layers: 2
+  mlp_dim: 128
+  dropout: 0.1
+  steering_scale: 100.0
+  speed_scale: 20.0
+
+labels:
+  steering_limit: 100.0
+  speed_limit: 20.0
+
+train:
+  batch_size: 256
+  epochs: 120
+  lr: 0.0003
+  weight_decay: 0.0001
+  num_workers: 0
+  checkpoint_dir: checkpoints/motor_control_lidar_attention_combined_2026_06_23
+
+control:
+  steering_output_gain: 1.0
+  speed_output_gain: 1.0
+  motor_max_angle: 100.0
+  motor_min_speed: 0.0
+  motor_max_speed: 20.0
+  motor_topic: /xycar_motor
+  motor_msg_type: xycar_msgs/msg/XycarMotor
+
+ros2:
+  inference_hz: 20.0
+  qos_depth: 10
+  perception:
+    yolo_model: yolov8n.pt
+    yolo_conf: 0.35
+    yolo_enabled: false
+    lane_roi_y: 0.55
+    canny_low: 60
+    canny_high: 160
+  topics:
+    image: /usb_cam/image_raw/front
+    perception_features: /vla_driving/perception_features
+    lidar: /scan
+    steering_cmd: /vla_driving/steering
+    speed_cmd: /vla_driving/speed
+    motor_cmd: /xycar_motor

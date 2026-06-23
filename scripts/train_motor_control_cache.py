@@ -15,7 +15,7 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from scripts.train_motor_control import resolve_device
-from vla_driving.models.motor_control import MotorControlMLP
+from vla_driving.models.motor_control import build_motor_control_model
 from vla_driving.utils.config import load_config
 
 
@@ -54,7 +54,7 @@ def main() -> None:
     print("samples:", len(train_dataset), len(val_dataset))
     print("feature dims:", train_dataset.perception.shape[1], train_dataset.lidar.shape[1])
 
-    model = MotorControlMLP(**cfg["model"]).to(device)
+    model = build_motor_control_model(cfg["model"]).to(device)
     checkpoint_dir = Path(cfg["train"]["checkpoint_dir"])
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = checkpoint_dir / "best.pt"
@@ -100,7 +100,7 @@ def main() -> None:
 
 
 def run_epoch(
-    model: MotorControlMLP,
+    model: nn.Module,
     loader: DataLoader,
     loss_fn: nn.Module,
     device: torch.device,

@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from vla_driving.data.motor_control_dataset import MotorControlDataset
-from vla_driving.models.motor_control import MotorControlMLP
+from vla_driving.models.motor_control import build_motor_control_model
 from vla_driving.utils.config import load_config
 
 
@@ -45,7 +45,7 @@ def main() -> None:
     cfg = load_config(args.config)
     torch.manual_seed(cfg["seed"])
     device = resolve_device(cfg["device"])
-    model = MotorControlMLP(**cfg["model"]).to(device)
+    model = build_motor_control_model(cfg["model"]).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=cfg["train"]["lr"],
@@ -89,7 +89,7 @@ def main() -> None:
 
 
 def run_epoch(
-    model: MotorControlMLP,
+    model: nn.Module,
     loader: DataLoader,
     loss_fn: nn.Module,
     device: torch.device,

@@ -7,7 +7,7 @@ import numpy as np
 import torch
 
 from vla_driving.data.lane_steering_dataset import summarize_lidar
-from vla_driving.models.motor_control import MotorControlMLP
+from vla_driving.models.motor_control import build_motor_control_model
 from vla_driving.perception import PerceptionExtractor
 from vla_driving.utils.config import load_config
 
@@ -33,7 +33,7 @@ class MotorControlInferenceNode:
         self.node = _Node("vla_motor_control_inference")
         self.cfg = cfg
         self.device = self._resolve_device(cfg["device"])
-        self.model = MotorControlMLP(**cfg["model"]).to(self.device)
+        self.model = build_motor_control_model(cfg["model"]).to(self.device)
         self.model.load_state_dict(torch.load(checkpoint, map_location=self.device))
         self.model.eval()
 
