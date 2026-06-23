@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -64,14 +65,16 @@ class MotorTemporalDataset(Dataset[dict[str, torch.Tensor]]):
         features = np.zeros((len(samples), feature_dim), dtype=np.float32)
         targets = np.zeros((len(samples), 2), dtype=np.float32)
         bag_keys: list[str] = []
+        pose_origins: dict[str, np.ndarray] = {}
 
         for idx, sample in enumerate(samples):
+            bag_key = self._bag_key(str(sample["lidar"]))
             perception = self._fit_vector(sample["perception"], self.perception_dim)
             lidar = np.load(self.data_root / sample["lidar"]).astype(np.float32)
             lidar = self._fit_vector(lidar, self.lidar_size)
             lidar = np.nan_to_num(lidar, nan=0.0, posinf=0.0, neginf=0.0)
             lidar = np.clip(lidar, 0.0, self.lidar_max_range) / max(self.lidar_max_range, 1e-6)
-            pose = self._fit_vector(sample.get("pose", []), self.pose_dim)
+            pose = self._pose_features(sample.get("pose"), bag_key, pose_origins)
             steering = float(np.clip(sample["steering"], -self.steering_limit, self.steering_limit))
             speed = float(np.clip(sample["speed"], 0.0, self.speed_limit))
 
@@ -82,7 +85,7 @@ class MotorTemporalDataset(Dataset[dict[str, torch.Tensor]]):
             if self.pose_dim > 0:
                 features[idx, lidar_end : lidar_end + self.pose_dim] = pose
             targets[idx] = [steering, speed]
-            bag_keys.append(self._bag_key(str(sample["lidar"])))
+            bag_keys.append(bag_key)
 
         return features, targets, bag_keys
 
@@ -112,3 +115,22 @@ class MotorTemporalDataset(Dataset[dict[str, torch.Tensor]]):
         fitted = np.zeros(size, dtype=np.float32)
         fitted[: min(size, values.shape[0])] = values[:size]
         return fitted
+
+    def _pose_features(
+        self,
+        values: Any,
+        bag_key: str,
+        origins: dict[str, np.ndarray],
+    ) -> np.ndarray:
+        if self.pose_dim <= 0:
+            return np.zeros(0, dtype=np.float32)
+        pose = self._fit_vector(values or [], 3)
+        if self.pose_dim != 4:
+            return self._fit_vector(pose, self.pose_dim)
+        if not np.any(pose):
+            return np.asarray([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+        if bag_key not in origins:
+            origins[bag_key] = pose[:2].copy()
+        rel_xy = pose[:2] - origins[bag_key]
+        yaw = float(pose[2])
+        return np.asarray([rel_xy[0], rel_xy[1], math.sin(yaw), math.cos(yaw)], dtype=np.float32)
