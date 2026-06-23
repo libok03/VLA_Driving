@@ -21,6 +21,7 @@ class MotorControlDataset(Dataset[dict[str, torch.Tensor]]):
         steering_limit: float,
         speed_limit: float,
         lidar_max_range: float = 10.0,
+        use_lidar_summary: bool = True,
         max_samples: int = 0,
     ) -> None:
         self.data_root = Path(data_root)
@@ -33,6 +34,7 @@ class MotorControlDataset(Dataset[dict[str, torch.Tensor]]):
         self.steering_limit = float(steering_limit)
         self.speed_limit = float(speed_limit)
         self.lidar_max_range = float(lidar_max_range)
+        self.use_lidar_summary = bool(use_lidar_summary)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -42,15 +44,20 @@ class MotorControlDataset(Dataset[dict[str, torch.Tensor]]):
         perception = self._fit_vector(sample["perception"], self.perception_dim)
         lidar = np.load(self.data_root / sample["lidar"]).astype(np.float32)
         lidar = self._fit_vector(lidar, self.lidar_size)
-        lidar_summary = summarize_lidar(lidar, self.lidar_max_range)
         steering = float(np.clip(sample["steering"], -self.steering_limit, self.steering_limit))
         speed = float(np.clip(sample["speed"], 0.0, self.speed_limit))
         target = np.asarray([steering, speed], dtype=np.float32)
-        return {
+        item = {
             "perception": torch.from_numpy(perception),
-            "lidar_summary": torch.from_numpy(lidar_summary),
             "target": torch.from_numpy(target),
         }
+        if self.use_lidar_summary:
+            item["lidar_summary"] = torch.from_numpy(summarize_lidar(lidar, self.lidar_max_range))
+        else:
+            lidar = np.nan_to_num(lidar, nan=0.0, posinf=0.0, neginf=0.0)
+            lidar = np.clip(lidar, 0.0, self.lidar_max_range) / max(self.lidar_max_range, 1e-6)
+            item["lidar"] = torch.from_numpy(lidar)
+        return item
 
     @staticmethod
     def _load_manifest(manifest_path: str | Path) -> list[dict[str, Any]]:

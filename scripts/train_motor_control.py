@@ -31,6 +31,7 @@ def build_dataset(cfg: dict, split: str, max_samples: int = 0) -> MotorControlDa
         steering_limit=label_cfg["steering_limit"],
         speed_limit=label_cfg["speed_limit"],
         lidar_max_range=data_cfg.get("lidar_max_range", 10.0),
+        use_lidar_summary=data_cfg.get("use_lidar_summary", True),
         max_samples=max_samples,
     )
 
@@ -98,10 +99,11 @@ def run_epoch(
     total_count = 0
     for batch in tqdm(loader, leave=False):
         perception = batch["perception"].to(device)
-        lidar_summary = batch["lidar_summary"].to(device)
+        lidar_key = "lidar_summary" if "lidar_summary" in batch else "lidar"
+        lidar = batch[lidar_key].to(device)
         target = batch["target"].to(device)
 
-        pred = model(perception, lidar_summary)
+        pred = model(perception, lidar)
         loss = loss_fn(pred, target)
         if optimizer is not None:
             optimizer.zero_grad(set_to_none=True)

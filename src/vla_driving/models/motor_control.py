@@ -11,6 +11,7 @@ class MotorControlMLP(nn.Module):
         self,
         perception_dim: int = 32,
         lidar_summary_dim: int = 5,
+        lidar_size: int | None = None,
         hidden_dim: int = 96,
         dropout: float = 0.05,
         steering_scale: float = 100.0,
@@ -18,7 +19,8 @@ class MotorControlMLP(nn.Module):
     ) -> None:
         super().__init__()
         self.register_buffer("output_scale", torch.tensor([steering_scale, speed_scale], dtype=torch.float32))
-        input_dim = perception_dim + lidar_summary_dim
+        lidar_dim = lidar_summary_dim if lidar_size is None else int(lidar_size)
+        input_dim = perception_dim + lidar_dim
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(inplace=True),
@@ -30,8 +32,8 @@ class MotorControlMLP(nn.Module):
             nn.Tanh(),
         )
 
-    def forward(self, perception: torch.Tensor, lidar_summary: torch.Tensor) -> torch.Tensor:
-        features = torch.cat([perception, lidar_summary], dim=1)
+    def forward(self, perception: torch.Tensor, lidar: torch.Tensor) -> torch.Tensor:
+        features = torch.cat([perception, lidar], dim=1)
         output = self.net(features) * self.output_scale
         speed = torch.clamp(output[:, 1], min=0.0)
         return torch.stack([output[:, 0], speed], dim=1)

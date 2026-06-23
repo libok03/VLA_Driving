@@ -41,6 +41,7 @@ class MotorControlInferenceNode:
         self.perception_dim = int(data_cfg["perception_dim"])
         self.lidar_size = int(data_cfg["lidar_size"])
         self.lidar_max_range = float(data_cfg.get("lidar_max_range", 10.0))
+        self.use_lidar_summary = bool(data_cfg.get("use_lidar_summary", True))
         perception_cfg = dict(cfg["ros2"].get("perception", {}))
         perception_cfg["dim"] = self.perception_dim
         self.perception_extractor = PerceptionExtractor(perception_cfg, dim=self.perception_dim)
@@ -55,7 +56,7 @@ class MotorControlInferenceNode:
         self.motor_msg_type = control_cfg.get("motor_msg_type", "xycar_msgs/msg/XycarMotor")
 
         self.perception_tensor: torch.Tensor | None = None
-        self.lidar_summary_tensor: torch.Tensor | None = None
+        self.lidar_tensor: torch.Tensor | None = None
 
         topics = cfg["ros2"]["topics"]
         qos = int(cfg["ros2"].get("qos_depth", 10))
@@ -100,14 +101,18 @@ class MotorControlInferenceNode:
         ranges = np.asarray(msg.ranges, dtype=np.float32)
         fitted = np.zeros(self.lidar_size, dtype=np.float32)
         fitted[: min(fitted.shape[0], ranges.shape[0])] = ranges[: fitted.shape[0]]
-        summary = summarize_lidar(fitted, max_range=self.lidar_max_range)
-        self.lidar_summary_tensor = torch.from_numpy(summary).unsqueeze(0).to(self.device)
+        if self.use_lidar_summary:
+            lidar = summarize_lidar(fitted, max_range=self.lidar_max_range)
+        else:
+            lidar = np.nan_to_num(fitted, nan=0.0, posinf=0.0, neginf=0.0)
+            lidar = np.clip(lidar, 0.0, self.lidar_max_range) / max(self.lidar_max_range, 1e-6)
+        self.lidar_tensor = torch.from_numpy(lidar).unsqueeze(0).to(self.device)
 
     def _tick(self) -> None:
-        if self.perception_tensor is None or self.lidar_summary_tensor is None:
+        if self.perception_tensor is None or self.lidar_tensor is None:
             return
         with torch.no_grad():
-            output = self.model(self.perception_tensor, self.lidar_summary_tensor)[0].cpu().numpy()
+            output = self.model(self.perception_tensor, self.lidar_tensor)[0].cpu().numpy()
         steering = float(output[0]) * self.steering_output_gain
         speed = float(output[1]) * self.speed_output_gain
         steering = float(np.clip(steering, -self.motor_max_angle, self.motor_max_angle))
