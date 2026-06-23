@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
 
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from vla_driving.data.motor_temporal_dataset import MotorTemporalDataset
 from vla_driving.models.motor_temporal import MotorTemporalGRU

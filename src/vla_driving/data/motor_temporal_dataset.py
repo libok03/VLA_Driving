@@ -89,11 +89,14 @@ class MotorTemporalDataset(Dataset[dict[str, torch.Tensor]]):
 
     @staticmethod
     def _bag_key(lidar_path: str) -> str:
-        parts = Path(lidar_path).parts
+        path = Path(lidar_path)
+        if path.parent.name == "lidar" and path.parent.parent.name:
+            return path.parent.parent.as_posix()
+        parts = path.parts
         for part in parts:
             if part.startswith("rosbag2_"):
                 return part
-        return ""
+        return path.parent.as_posix()
 
     @staticmethod
     def _fit_vector(values: Any, size: int) -> np.ndarray:
