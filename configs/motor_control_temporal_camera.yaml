@@ -15,6 +15,7 @@ model:
   lidar_size: 360
   pose_dim: 4
   image_feature_dim: 256
+  camera_pretrained: true
   hidden_dim: 256
   gru_layers: 2
   dropout: 0.1
@@ -26,7 +27,7 @@ labels:
   speed_limit: 20.0
 
 train:
-  batch_size: 64
+  batch_size: 32
   epochs: 120
   lr: 0.0003
   weight_decay: 0.0001

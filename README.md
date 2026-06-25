@@ -1,427 +1,212 @@
 # VLA Driving
 
-ROS2/Unity 기반 Xycar 주행 학습 프로젝트입니다. 현재 가장 잘 동작하는 경로는 **작은 차선 추종 모델**입니다.
+카메라 원본 이미지, LiDAR, 현재 위치를 받아서 `/xycar_motor`의 조향각과 속도를 직접 예측하는 ROS2 주행 학습 코드입니다.
+
+현재 기준 입력은 아래 네 가지입니다.
 
 ```text
-camera feature[32] + lidar summary[5]
--> steering 직접 예측
--> /xycar_motor.angle
-
-speed는 현재 고정 또는 teleop label로 별도 수집
+/usb_cam/image_raw/front    카메라 원본 이미지
+/scan                       360개 LiDAR 거리값
+/scan_odom_map              현재 위치와 yaw
+/xycar_motor                사람이 조종한 정답 angle/speed
 ```
 
-기존 waypoint VLA 모델도 남아 있지만, 차선 추종 안정화에는 `lane_steering` 파이프라인을 먼저 사용합니다.
-
-## 현재 권장 구조
+모델 구조는 아래와 같습니다.
 
 ```text
-Unity camera
-  -> scripts/publish_camera_features.py
-  -> /vla_driving/perception_features
+image[3,224,224] -> pretrained ResNet18
+lidar[360]
+pose[4] = relative_x, relative_y, sin(yaw), cos(yaw)
 
-/scan
-  -> 5구간 LiDAR 요약
-
-/vla_driving/perception_features + /scan
-  -> LaneSteeringMLP
-  -> /vla_driving/steering
-  -> /xycar_motor.angle
+최근 5프레임 -> GRU -> [steering, speed]
 ```
 
-현재 모델 입력:
+실시간 실행 시 모델 출력은 `/xycar_motor`로 publish됩니다.
+
+## 파일
 
 ```text
-perception_features[32]
-lidar_summary[5] = front, front_left, front_right, left, right
-```
+configs/motor_control_temporal_camera.yaml
+    학습과 추론 설정
 
-현재 모델 출력:
+scripts/extract_sqlite_motor_bag.py
+    ROS2 sqlite bag에서 image, lidar, pose, motor label 추출
 
-```text
-steering
-```
+scripts/train_motor_control_temporal_camera.py
+    ResNet18 + GRU 모델 학습
 
-현재 실시간 주행 속도:
+scripts/infer_motor_control_temporal_camera.py
+    ROS2 topic을 받아 실시간으로 /xycar_motor publish
 
-```text
-configs/lane_steering.yaml의 fixed_speed 사용
-```
+src/vla_driving/data/motor_temporal_image_dataset.py
+    이미지 sequence dataset
 
-## 주요 파일
-
-```text
-configs/lane_steering.yaml          현재 권장 차선 추종 config
-scripts/publish_camera_features.py  카메라 -> perception feature publisher
-scripts/train_lane_steering.py      steering 직접 예측 모델 학습
-scripts/infer_lane_steering.py      ROS2 실시간 차선 추종 inference
-scripts/teleop_xycar_motor.py       /xycar_motor 직접 조종 및 bag label 수집용
-scripts/inspect_lane_steering_data.py
-                                    steering label 분포 확인
-
-scripts/extract_ros2_bag.py         ROS2 bag -> dataset 추출
-scripts/train.py                    기존 waypoint VLA 학습
-scripts/infer.py                    기존 waypoint VLA inference
+src/vla_driving/models/motor_temporal_camera.py
+    ResNet18 image encoder + GRU 모델
 ```
 
 ## 설치
 
-Windows에서 학습할 때:
+repo 루트에서 실행합니다.
 
-```powershell
-cd C:\Users\markp\OneDrive\Desktop\VLA_Driving
+```bash
 pip install -e .
 ```
 
-WSL/ROS2에서 실행할 때:
-
-```bash
-cd ~/VLA_Driving
-source /opt/ros/humble/setup.bash
-source ~/xycar_ws/install/setup.bash
-```
-
-## ROS2 실행 순서
-
-### 1. Unity endpoint
-
-터미널 1:
+ROS2 환경에서 실행할 때는 매 터미널마다 source합니다.
 
 ```bash
 source /opt/ros/humble/setup.bash
 source ~/xycar_ws/install/setup.bash
-ros2 run ros_tcp_endpoint default_server_endpoint
+export PYTHONPATH=$PWD/src:$PYTHONPATH
 ```
 
-그 다음 Unity Play를 한 번만 누릅니다. Play/Stop을 반복하면 `ros_tcp_endpoint`가 `InvalidHandle`로 죽을 수 있습니다.
+## 1. Bag Topic 확인
 
-문제가 생기면:
+bag 안에 필요한 topic이 있는지 먼저 확인합니다.
 
 ```bash
-pkill -f ros_tcp_endpoint || true
-pkill -f default_server_endpoint || true
-ros2 daemon stop
-ros2 daemon start
+sqlite3 BAG.db3 "select name,type from topics;"
 ```
 
-### 2. 카메라 feature publisher
-
-터미널 2:
-
-```bash
-cd ~/VLA_Driving
-source /opt/ros/humble/setup.bash
-source ~/xycar_ws/install/setup.bash
-
-PYTHONPATH=src:$PYTHONPATH python3 scripts/publish_camera_features.py \
-  --config configs/lane_steering.yaml
-```
-
-출력 topic:
+필요 topic:
 
 ```text
-/vla_driving/perception_features
-```
-
-### 3. 차선 추종 inference
-
-터미널 3:
-
-```bash
-cd ~/VLA_Driving
-source /opt/ros/humble/setup.bash
-source ~/xycar_ws/install/setup.bash
-
-PYTHONPATH=src:$PYTHONPATH python3 scripts/infer_lane_steering.py \
-  --config configs/lane_steering.yaml \
-  --checkpoint checkpoints/lane_steering/best.pt
-```
-
-확인:
-
-```bash
-ros2 topic echo /xycar_motor --once
-ros2 topic echo /vla_driving/steering --once
-ros2 topic info /xycar_motor -v
-```
-
-정상이라면 `/xycar_motor` publisher가 `vla_lane_steering_inference`로 보입니다.
-
-## ROS teleop으로 expert bag 찍기
-
-Unity 내부 WASD는 `/xycar_motor`로 publish되지 않을 수 있습니다. 모델이 steering/speed를 직접 배우게 하려면 ROS에서 `/xycar_motor`를 publish하면서 운전해야 합니다.
-
-터미널 3 또는 별도 터미널:
-
-```bash
-cd ~/VLA_Driving
-source /opt/ros/humble/setup.bash
-source ~/xycar_ws/install/setup.bash
-
-PYTHONPATH=src:$PYTHONPATH python3 scripts/teleop_xycar_motor.py
-```
-
-현재 기본 조작:
-
-```text
-w / k   -> speed 10
-l       -> speed 20
-s/space -> speed 0
-a       -> steering 왼쪽으로 80씩 변화
-d       -> steering 오른쪽으로 80씩 변화
-x       -> steering 0
-
-max steering: +/-100
-키를 떼면 steering이 3씩 천천히 0으로 복귀
-publish rate: 80 Hz
-```
-
-실행 시 값 조절:
-
-```bash
-PYTHONPATH=src:$PYTHONPATH python3 scripts/teleop_xycar_motor.py \
-  --steer-step 60 \
-  --center-step 2 \
-  --max-angle 100 \
-  --low-speed 10 \
-  --high-speed 20
-```
-
-## Bag 녹화
-
-### 현재 steering/speed label까지 저장하는 권장 bag
-
-```bash
-ros2 bag record \
-  /vla_driving/perception_features \
-  /scan \
-  /scan_odom_map \
-  /xycar_motor
-```
-
-필수 topic:
-
-```text
-/vla_driving/perception_features  모델 input
-/scan                             모델 input
-/scan_odom_map                    odom 기반 label/검증용
-/xycar_motor                      expert steering/speed label
-```
-
-녹화 중 `/xycar_motor`가 실제로 찍히는지 확인:
-
-```bash
-ros2 topic echo /xycar_motor --once
-```
-
-bag 확인:
-
-```bash
-source /opt/ros/humble/setup.bash
-ros2 bag info ~/rosbag2_YYYY_MM_DD-HH_MM_SS
-```
-
-`/xycar_motor`가 없으면 expert steering/speed 직접 학습에는 부족합니다.
-
-## 기존 bag으로 가능한 것
-
-기존 bag이 아래 3개만 가진 경우:
-
-```text
-/vla_driving/perception_features
+/usb_cam/image_raw/front
 /scan
 /scan_odom_map
+/xycar_motor
 ```
 
-가능:
+## 2. Bag 추출
+
+단일 bag:
+
+```bash
+python scripts/extract_sqlite_motor_bag.py raw_bags/kookmin/driving_data \
+  --output-dir data/motor_camera_pose/extracted/driving_data \
+  --sample-hz 10 \
+  --image-topic /usb_cam/image_raw/front \
+  --pose-topic /scan_odom_map
+```
+
+여러 bag:
+
+```bash
+rm -rf data/motor_camera_pose
+mkdir -p data/motor_camera_pose/extracted
+
+for bag in raw_bags/kookmin/driving_data*; do
+  [ -d "$bag" ] || continue
+  name=$(basename "$bag")
+  python scripts/extract_sqlite_motor_bag.py "$bag" \
+    --output-dir "data/motor_camera_pose/extracted/$name" \
+    --sample-hz 10 \
+    --image-topic /usb_cam/image_raw/front \
+    --pose-topic /scan_odom_map
+done
+```
+
+추출 결과:
 
 ```text
-future odom trajectory에서 steering label 추정
-future odom displacement에서 speed label 추정
-차선 추종 학습
+data/motor_camera_pose/extracted/<bag_name>/manifest.jsonl
+data/motor_camera_pose/extracted/<bag_name>/images/*.jpg
+data/motor_camera_pose/extracted/<bag_name>/lidar/*.npy
 ```
 
-어려움:
-
-```text
-실제 expert 조향/속도 직접 학습
-정지/출발/보행자/앞차 대응을 명확한 command label로 학습
-```
-
-그래서 앞으로는 `/xycar_motor`를 반드시 포함해서 bag을 찍는 것을 권장합니다.
-
-## Dataset 추출
-
-ROS2 bag을 dataset으로 변환:
+## 3. Train/Val Split 생성
 
 ```bash
-cd ~/VLA_Driving
-source /opt/ros/humble/setup.bash
-source ~/xycar_ws/install/setup.bash
+mapfile -t dirs < <(find data/motor_camera_pose/extracted -mindepth 1 -maxdepth 1 -type d | sort -V)
 
-PYTHONPATH=src:$PYTHONPATH python3 scripts/extract_ros2_bag.py \
-  ~/rosbag2_YYYY_MM_DD-HH_MM_SS \
-  --config configs/lane_steering.yaml \
-  --output-dir data/my_bag \
-  --sample-hz 10 \
-  --generate-waypoints-from-odom
-```
+n=${#dirs[@]}
+val_count=$(( n / 5 ))
+[ "$val_count" -lt 1 ] && val_count=1
+train_count=$(( n - val_count ))
 
-기존 waypoint VLA용 route까지 만들 때:
-
-```bash
-PYTHONPATH=src:$PYTHONPATH python3 scripts/extract_ros2_bag.py \
-  ~/rosbag2_YYYY_MM_DD-HH_MM_SS \
-  --config configs/vla_15laps_no_route.yaml \
-  --output-dir data/my_bag \
-  --sample-hz 10 \
-  --generate-route-from-odom \
-  --generate-waypoints-from-odom
-```
-
-## Train/Val split 만들기
-
-여러 extracted bag을 합쳐서 train/val split 생성:
-
-```bash
-python3 scripts/build_dataset_split.py \
-  --output-dir data/vla_dataset \
-  --train data/bag_1 data/bag_2 data/bag_3 \
-  --val data/bag_val
+python scripts/build_dataset_split.py \
+  --output-dir data/motor_camera_pose \
+  --train "${dirs[@]:0:$train_count}" \
+  --val "${dirs[@]:$train_count}"
 ```
 
 생성 결과:
 
 ```text
-data/vla_dataset/train.jsonl
-data/vla_dataset/val.jsonl
+data/motor_camera_pose/train.jsonl
+data/motor_camera_pose/val.jsonl
 ```
 
-## Lane steering 학습
+## 4. 학습
 
-학습 전 label 분포 확인:
-
-```powershell
-cd C:\Users\markp\OneDrive\Desktop\VLA_Driving
-$env:PYTHONPATH="src"
-python scripts\inspect_lane_steering_data.py --config configs\lane_steering.yaml
-```
-
-100개 overfit 테스트:
-
-```powershell
-$env:PYTHONPATH="src"
-python scripts\train_lane_steering.py --config configs\lane_steering.yaml --overfit-samples 100
-```
-
-100개에서 train loss가 충분히 내려가지 않으면 아래 중 하나를 의심합니다:
-
-```text
-sensor와 label timestamp 불일치
-steering 부호 반대
-label scale 문제
-feature가 주행 판단에 부족
-```
-
-전체 학습:
-
-```powershell
-$env:PYTHONPATH="src"
-python scripts\train_lane_steering.py --config configs\lane_steering.yaml
-```
-
-결과 checkpoint:
-
-```text
-checkpoints/lane_steering/best.pt
-```
-
-Windows에서 학습한 checkpoint를 WSL로 복사:
-
-```bash
-cd ~/VLA_Driving
-mkdir -p checkpoints/lane_steering
-cp /mnt/c/Users/markp/OneDrive/Desktop/VLA_Driving/checkpoints/lane_steering/best.pt \
-   checkpoints/lane_steering/best.pt
-```
-
-## 현재 lane steering config
-
-핵심 설정:
+설정 파일에서 dataset 경로와 checkpoint 경로를 맞춥니다.
 
 ```yaml
+data:
+  data_root: data/motor_camera_pose
+  train_manifest: data/motor_camera_pose/train.jsonl
+  val_manifest: data/motor_camera_pose/val.jsonl
+
 model:
-  perception_dim: 32
-  lidar_summary_dim: 5
-  hidden_dim: 64
-  output_scale: 50.0
+  image_size: [224, 224]
+  sequence_length: 5
+  camera_pretrained: true
 
-control:
-  fixed_speed: 10.0
-  steering_output_gain: 50.0
-  motor_max_angle: 50.0
+train:
+  batch_size: 32
+
+checkpoint_dir: checkpoints/motor_control_temporal_camera
 ```
 
-`fixed_speed`는 `/xycar_motor.speed` command 단위입니다. Unity 화면 km/h와 1:1이 아닐 수 있습니다.
-
-## 기존 waypoint VLA
-
-초기 구조:
-
-```text
-perception[32] + lidar[360] + state[x,y,yaw,lap] + route[10,2]
--> future_waypoints[5,3]
--> Pure Pursuit 또는 lateral steering 변환
--> /xycar_motor
-```
-
-이 구조는 현재 트랙에서 waypoint가 한쪽으로 치우치거나 평균화되어 차선 추종이 불안정했습니다. 그래서 현재는 `lane_steering`을 기본 경로로 사용합니다.
-
-기존 모델 관련 파일:
-
-```text
-configs/base.yaml
-configs/vla_15laps.yaml
-configs/vla_15laps_no_route.yaml
-scripts/train.py
-scripts/infer.py
-src/vla_driving/models/lightweight_transfuser.py
-```
-
-## Troubleshooting
-
-### ros_tcp_endpoint가 `InvalidHandle`로 죽음
-
-증상:
-
-```text
-rclpy._rclpy_pybind11.InvalidHandle: cannot use Destroyable because destruction was requested
-Publisher already registered for provided node name
-Disconnected from 192.168...
-```
-
-원인:
-
-```text
-Unity가 ROS TCP endpoint에 끊겼다 다시 붙음
-Unity Play/Stop 반복
-Unity 씬에 ROS publisher/subscriber가 중복 등록
-endpoint 중복 실행
-```
-
-초기화:
+학습 실행:
 
 ```bash
-pkill -f ros_tcp_endpoint || true
-pkill -f default_server_endpoint || true
-pkill -f teleop_xycar_motor.py || true
-pkill -f publish_camera_features.py || true
-ros2 daemon stop
-ros2 daemon start
+python scripts/train_motor_control_temporal_camera.py \
+  --config configs/motor_control_temporal_camera.yaml
 ```
 
-그 다음 endpoint를 먼저 켜고 Unity Play를 한 번만 누릅니다.
+결과:
 
-### teleop이 publish되는데 차가 안 움직임
+```text
+checkpoints/motor_control_temporal_camera/best.pt
+```
+
+GPU 메모리가 부족하면 batch size를 낮춥니다.
+
+```bash
+sed -i 's/batch_size: 32/batch_size: 16/' configs/motor_control_temporal_camera.yaml
+```
+
+pretrained ResNet18은 처음 실행할 때 torchvision weight를 다운로드할 수 있습니다. 서버에 인터넷이 없으면 weight cache를 옮기거나, 임시 확인용으로 `camera_pretrained: false`를 사용할 수 있습니다.
+
+## 5. ROS2 실시간 추론
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/xycar_ws/install/setup.bash
+export PYTHONPATH=$PWD/src:$PYTHONPATH
+
+python scripts/infer_motor_control_temporal_camera.py \
+  --config configs/motor_control_temporal_camera.yaml \
+  --checkpoint checkpoints/motor_control_temporal_camera/best.pt
+```
+
+구독:
+
+```text
+/usb_cam/image_raw/front
+/scan
+/scan_odom_map
+```
+
+발행:
+
+```text
+/xycar_motor
+/vla_driving/steering
+/vla_driving/speed
+```
 
 확인:
 
@@ -430,31 +215,15 @@ ros2 topic echo /xycar_motor --once
 ros2 topic info /xycar_motor -v
 ```
 
-정상 조건:
+## 메모
+
+위치 입력은 절대 좌표를 그대로 넣지 않고 첫 프레임 기준 상대 위치로 바꿔 사용합니다.
 
 ```text
-Publisher count >= 1
-Subscription count >= 1
+relative_x = x - first_x
+relative_y = y - first_y
+sin(yaw)
+cos(yaw)
 ```
 
-`Subscription count`가 0이면 Unity가 `/xycar_motor`를 subscribe하지 않는 상태입니다.
-
-수동 publish 테스트:
-
-```bash
-ros2 topic pub --once /xycar_motor xycar_msgs/msg/XycarMotor "{angle: 0.0, speed: 10.0}"
-```
-
-이것도 안 움직이면 모델/teleop 문제가 아니라 Unity subscriber 또는 endpoint 문제입니다.
-
-## 추천 개발 순서
-
-1. `scripts/teleop_xycar_motor.py`로 `/xycar_motor` 조종이 되는지 확인
-2. `/vla_driving/perception_features`, `/scan`, `/scan_odom_map`, `/xycar_motor` 포함 bag 녹화
-3. `ros2 bag info`로 topic count 확인
-4. dataset 추출
-5. 100개 overfit
-6. 전체 학습
-7. WSL로 checkpoint 복사
-8. `scripts/infer_lane_steering.py`로 실시간 테스트
-
+LiDAR는 5개 요약값이 아니라 `/scan`의 360개 값을 사용합니다.

@@ -12,6 +12,9 @@ from torch.utils.data import Dataset
 
 
 class MotorTemporalImageDataset(Dataset[dict[str, torch.Tensor]]):
+    IMAGE_MEAN = np.asarray([0.485, 0.456, 0.406], dtype=np.float32)
+    IMAGE_STD = np.asarray([0.229, 0.224, 0.225], dtype=np.float32)
+
     def __init__(
         self,
         data_root: str | Path,
@@ -93,7 +96,7 @@ class MotorTemporalImageDataset(Dataset[dict[str, torch.Tensor]]):
         width, height = self.image_size[1], self.image_size[0]
         image = Image.open(self.data_root / image_path).convert("RGB").resize((width, height))
         array = np.asarray(image, dtype=np.float32) / 255.0
-        array = (array - 0.5) / 0.5
+        array = (array - self.IMAGE_MEAN) / self.IMAGE_STD
         return torch.from_numpy(array.transpose(2, 0, 1))
 
     def _valid_indices(self) -> list[int]:

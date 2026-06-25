@@ -16,6 +16,9 @@ from vla_driving.utils.config import load_config
 
 
 class MotorTemporalCameraInferenceNode:
+    IMAGE_MEAN = np.asarray([0.485, 0.456, 0.406], dtype=np.float32)
+    IMAGE_STD = np.asarray([0.229, 0.224, 0.225], dtype=np.float32)
+
     def __init__(self, cfg: dict, checkpoint: str) -> None:
         import rclpy
         from nav_msgs.msg import Odometry
@@ -135,7 +138,7 @@ class MotorTemporalCameraInferenceNode:
 
             image = np.asarray(PILImage.fromarray(image).resize((self.image_size[1], self.image_size[0])))
         image = image.astype(np.float32) / 255.0
-        image = (image - 0.5) / 0.5
+        image = (image - self.IMAGE_MEAN) / self.IMAGE_STD
         return image.transpose(2, 0, 1).astype(np.float32)
 
     def _pose_features(self, x: float, y: float, yaw: float) -> np.ndarray:

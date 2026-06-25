@@ -2,30 +2,20 @@ from __future__ import annotations
 
 import torch
 from torch import nn
+from torchvision.models import ResNet18_Weights, resnet18
 
 
 class CameraEncoder(nn.Module):
-    def __init__(self, hidden_dim: int = 256) -> None:
+    def __init__(self, hidden_dim: int = 256, pretrained: bool = False) -> None:
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=5, stride=2, padding=2),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(128, hidden_dim, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-        )
+        weights = ResNet18_Weights.DEFAULT if pretrained else None
+        backbone = resnet18(weights=weights)
+        self.backbone = nn.Sequential(*(list(backbone.children())[:-1]))
+        self.projection = nn.Linear(backbone.fc.in_features, hidden_dim)
 
     def forward(self, image: torch.Tensor) -> torch.Tensor:
-        return self.net(image)
+        features = self.backbone(image).flatten(1)
+        return self.projection(features)
 
 
 class MotorTemporalCameraGRU(nn.Module):
@@ -34,6 +24,7 @@ class MotorTemporalCameraGRU(nn.Module):
         lidar_size: int = 360,
         pose_dim: int = 4,
         image_feature_dim: int = 256,
+        camera_pretrained: bool = False,
         hidden_dim: int = 256,
         gru_layers: int = 2,
         dropout: float = 0.1,
@@ -42,7 +33,7 @@ class MotorTemporalCameraGRU(nn.Module):
     ) -> None:
         super().__init__()
         self.register_buffer("output_scale", torch.tensor([steering_scale, speed_scale], dtype=torch.float32))
-        self.camera_encoder = CameraEncoder(image_feature_dim)
+        self.camera_encoder = CameraEncoder(image_feature_dim, pretrained=camera_pretrained)
         input_dim = int(image_feature_dim) + int(lidar_size) + int(pose_dim)
         self.frame_encoder = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
