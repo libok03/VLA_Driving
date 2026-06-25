@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from PIL import Image as PILImage
 
 
 class CdrReader:
@@ -27,6 +28,11 @@ class CdrReader:
         self.align(4)
         value = struct.unpack_from(self.endian + "I", self.data, self.offset)[0]
         self.offset += 4
+        return int(value)
+
+    def u8(self) -> int:
+        value = self.data[self.offset]
+        self.offset += 1
         return int(value)
 
     def i32(self) -> int:
@@ -61,6 +67,12 @@ class CdrReader:
         self.offset += byte_count
         return values
 
+    def u8_array(self) -> np.ndarray:
+        size = self.u32()
+        values = np.frombuffer(self.data, dtype=np.uint8, count=size, offset=self.offset).copy()
+        self.offset += size
+        return values
+
 
 def read_header(reader: CdrReader) -> None:
     reader.i32()
@@ -86,6 +98,32 @@ def parse_laser_scan(data: bytes) -> np.ndarray:
         reader.f32()
     ranges = reader.f32_array()
     return ranges
+
+
+def parse_image(data: bytes) -> PILImage.Image:
+    reader = CdrReader(data)
+    read_header(reader)
+    height = reader.u32()
+    width = reader.u32()
+    encoding = reader.string().lower()
+    reader.u8()
+    step = reader.u32()
+    raw = reader.u8_array()
+    channels = channels_for_encoding(encoding)
+    image = raw.reshape(height, step)[:, : width * channels].reshape(height, width, channels)
+    if encoding == "bgr8":
+        image = image[:, :, ::-1].copy()
+    if channels == 1:
+        image = np.repeat(image, 3, axis=2)
+    return PILImage.fromarray(image.astype(np.uint8), mode="RGB")
+
+
+def channels_for_encoding(encoding: str) -> int:
+    if encoding in {"rgb8", "bgr8"}:
+        return 3
+    if encoding in {"mono8", "8uc1"}:
+        return 1
+    raise ValueError(f"Unsupported image encoding: {encoding}")
 
 
 def parse_xycar_motor(data: bytes) -> tuple[float, float]:
@@ -179,13 +217,18 @@ def extract_bag(
     lidar_topic: str,
     motor_topic: str,
     pose_topic: str,
+    image_topic: str,
     perception_dim: int,
     lidar_size: int,
+    image_quality: int,
 ) -> int:
     db_path = db3_path_for_bag(bag_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     lidar_dir = output_dir / "lidar"
     lidar_dir.mkdir(parents=True, exist_ok=True)
+    image_dir = output_dir / "images"
+    if image_topic:
+        image_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = output_dir / "manifest.jsonl"
     if manifest_path.exists():
         manifest_path.unlink()
@@ -196,14 +239,19 @@ def extract_bag(
     steering: float | None = None
     speed: float | None = None
     pose: np.ndarray | None = None
+    image: PILImage.Image | None = None
     next_sample_ns: int | None = None
     sample_index = 0
 
     con = sqlite3.connect(db_path)
     topics = topic_map(con)
-    wanted = {perception_topic, lidar_topic, motor_topic}
+    wanted = {lidar_topic, motor_topic}
+    if perception_topic:
+        wanted.add(perception_topic)
     if pose_topic:
         wanted.add(pose_topic)
+    if image_topic:
+        wanted.add(image_topic)
     query = """
         select topic_id, timestamp, data
         from messages
@@ -223,6 +271,8 @@ def extract_bag(
                     steering, speed = parse_xycar_motor(raw)
                 elif topic_name == pose_topic:
                     pose = parse_pose(raw, topic_type)
+                elif topic_name == image_topic:
+                    image = parse_image(raw)
             except Exception as exc:
                 raise RuntimeError(f"Failed to parse {topic_name} at {timestamp_ns} in {bag_dir}") from exc
 
@@ -230,23 +280,37 @@ def extract_bag(
                 next_sample_ns = int(timestamp_ns)
             if int(timestamp_ns) < next_sample_ns:
                 continue
-            if perception is None or lidar is None or steering is None or speed is None:
+            if lidar is None or steering is None or speed is None:
+                next_sample_ns = int(timestamp_ns) + period_ns
+                continue
+            if not image_topic and perception is None:
                 next_sample_ns = int(timestamp_ns) + period_ns
                 continue
             if pose_topic and pose is None:
+                next_sample_ns = int(timestamp_ns) + period_ns
+                continue
+            if image_topic and image is None:
                 next_sample_ns = int(timestamp_ns) + period_ns
                 continue
 
             stem = f"{sample_index:06d}"
             lidar_path = lidar_dir / f"{stem}.npy"
             np.save(lidar_path, lidar)
+            image_relpath = ""
+            if image_topic and image is not None:
+                image_path = image_dir / f"{stem}.jpg"
+                image.save(image_path, quality=image_quality)
+                image_relpath = image_path.relative_to(output_dir).as_posix()
             sample = {
-                "perception": perception.astype(float).tolist(),
                 "lidar": lidar_path.relative_to(output_dir).as_posix(),
                 "steering": float(steering),
                 "speed": float(speed),
                 "stamp": int(timestamp_ns) / 1_000_000_000.0,
             }
+            if perception is not None:
+                sample["perception"] = perception.astype(float).tolist()
+            if image_relpath:
+                sample["image"] = image_relpath
             if pose_topic and pose is not None:
                 sample["pose"] = pose.astype(float).tolist()
             manifest.write(json.dumps(sample, separators=(",", ":")) + "\n")
@@ -265,6 +329,8 @@ def main() -> None:
     parser.add_argument("--lidar-topic", default="/scan")
     parser.add_argument("--motor-topic", default="/xycar_motor")
     parser.add_argument("--pose-topic", default="", help="Optional nav_msgs/Odometry or PoseStamped topic.")
+    parser.add_argument("--image-topic", default="", help="Optional sensor_msgs/Image topic for camera training.")
+    parser.add_argument("--image-quality", type=int, default=90)
     parser.add_argument("--perception-dim", type=int, default=32)
     parser.add_argument("--lidar-size", type=int, default=360)
     args = parser.parse_args()
@@ -279,8 +345,10 @@ def main() -> None:
         lidar_topic=args.lidar_topic,
         motor_topic=args.motor_topic,
         pose_topic=args.pose_topic,
+        image_topic=args.image_topic,
         perception_dim=args.perception_dim,
         lidar_size=args.lidar_size,
+        image_quality=args.image_quality,
     )
     print(f"Wrote {count} samples to {args.output_dir}")
 
