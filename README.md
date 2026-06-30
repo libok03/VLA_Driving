@@ -1,5 +1,9 @@
 # VLA Driving
 
+## Temporal Full-LiDAR Control Model
+
+![Temporal full-LiDAR control model](docs/temporal-full-lidar-flow.png)
+
 ROS2/Unity 기반 Xycar 주행 학습 프로젝트입니다. 현재 가장 잘 동작하는 경로는 **작은 차선 추종 모델**입니다.
 
 ```text
