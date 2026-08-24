@@ -90,22 +90,28 @@ AVOID recall은 높지만 DRIVE를 AVOID로 판정하는 보수적 오탐이 아
 
 ### V17 bag replay
 
-아래는 2026-08-18 V17 best checkpoint의 실제 open-loop bag replay다. 큰
-썸네일을 누르면 MP4가 열린다. 영상에는 카메라 3대, LiDAR BEV,
+아래는 2026-08-18 V17 best checkpoint의 실제 open-loop bag replay다.
+영상에는 카메라 3대, LiDAR BEV,
 DRIVE/AVOID candidate, action probability, station별 speed가 포함된다.
 queue·MPC·safety monitor는 적용 전이다.
 
 #### DRIVE — green crossing, 22.75초
 
-[![V17 DRIVE video](assets/morai_v17/qualitative/drive_correct.jpg)](assets/morai_v17/videos/v17_green_crossing_drive.mp4)
+![V17 DRIVE replay](assets/morai_v17/videos/v17_green_crossing_drive.gif)
+
+[원본 MP4 다운로드](assets/morai_v17/videos/v17_green_crossing_drive.mp4)
 
 #### STOP — green crossing, 8.5초
 
-[![V17 STOP video](assets/morai_v17/qualitative/stop_correct.jpg)](assets/morai_v17/videos/v17_green_crossing_stop.mp4)
+![V17 STOP replay](assets/morai_v17/videos/v17_green_crossing_stop.gif)
+
+[원본 MP4 다운로드](assets/morai_v17/videos/v17_green_crossing_stop.mp4)
 
 #### AVOID — static-obstacle label 구간, 3.2초
 
-[![V17 AVOID video](assets/morai_v17/qualitative/avoid_correct.jpg)](assets/morai_v17/videos/v17_static_obstacle_avoid.mp4)
+![V17 AVOID replay](assets/morai_v17/videos/v17_static_obstacle_avoid.gif)
+
+[원본 MP4 다운로드](assets/morai_v17/videos/v17_static_obstacle_avoid.mp4)
 
 ## 5. ROS/MPC 런타임 연결
 
