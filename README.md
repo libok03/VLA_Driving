@@ -1,9 +1,7 @@
 # VLA Driving
 
-이 저장소는 두 개의 연구 트랙을 함께 관리합니다.
-
-1. **ROS2 motor-control**: 카메라, 2D LiDAR, pose로 `/xycar_motor`의 조향각과 속도를 예측하는 경량 모델
-2. **MORAI V17 planner**: 3대 카메라와 VLP16 BEV, 단일 목표점으로 30 m 공간 경로와 상태를 예측하고 MPC에 전달하는 멀티모달 플래너
+이 저장소는 3대 카메라와 VLP16 BEV, 단일 목표점으로 30 m 공간 경로와
+상태를 예측하고 MPC에 전달하는 MORAI V17 멀티모달 플래너를 기록한다.
 
 raw bag, 변환 NPZ, 학습 출력, checkpoint는 용량 및 데이터 관리 문제로 Git에 포함하지 않습니다. 재현용 소스와 변환·학습 정책은 포함합니다.
 
