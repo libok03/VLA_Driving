@@ -11,9 +11,35 @@ MORAI 환경에서 주어진 목표 방향으로 경로를 만들고, 정지·�
 
 ### Demo
 
-V17 영상은 GitHub README에서 바로 보이도록 GIF로 삽입했다.
-[V17 bag replay](#v17-bag-replay)에서 DRIVE·STOP·AVOID 결과를 바로
-재생할 수 있다. MP4 원본은 각 GIF 아래의 다운로드 링크로만 제공한다.
+#### V17 open-loop bag replay
+
+**DRIVE — green crossing, 22.75초**
+
+![V17 DRIVE replay](assets/morai_v17/videos/v17_green_crossing_drive.gif)
+
+**STOP — green crossing, 8.5초**
+
+![V17 STOP replay](assets/morai_v17/videos/v17_green_crossing_stop.gif)
+
+**AVOID — static-obstacle label 구간, 3.2초**
+
+![V17 AVOID replay](assets/morai_v17/videos/v17_static_obstacle_avoid.gif)
+
+#### TCP/MPC baseline bag replay
+
+아래 3개는 V17 결과가 아니라 비교용 TCP/MPC baseline이다.
+
+**파란불 직진 교차로 통과**
+
+![TCP green crossing](assets/morai_v17/videos/tcp_green_crossing.gif)
+
+**일반 신호등 통과**
+
+![TCP green signal crossing](assets/morai_v17/videos/tcp_green_signal_crossing.gif)
+
+**정적 장애물 구간 MPC 속도 preview**
+
+![TCP static obstacle speed preview](assets/morai_v17/videos/tcp_static_obstacle_speed_preview.gif)
 
 ## 2. 최종 시스템: MORAI V17
 
@@ -76,30 +102,12 @@ VLP16 BEV     [B, 5, 3, 256, 256] ─── Light BEV CNN
 
 AVOID recall은 높지만 DRIVE를 AVOID로 판정하는 보수적 오탐이 아직 존재한다. 따라서 실제 runtime에서는 raw argmax를 즉시 적용하지 않고 state queue, confidence threshold, TTC 기반 safety monitor를 함께 사용해야 한다. 이 수치는 차선 이탈·충돌이 없다는 보증이 아니다.
 
-### V17 bag replay
+### V17 bag replay 해석
 
-아래는 2026-08-18 V17 best checkpoint의 실제 open-loop bag replay다.
-영상에는 카메라 3대, LiDAR BEV,
-DRIVE/AVOID candidate, action probability, station별 speed가 포함된다.
-queue·MPC·safety monitor는 적용 전이다.
-
-#### DRIVE — green crossing, 22.75초
-
-![V17 DRIVE replay](assets/morai_v17/videos/v17_green_crossing_drive.gif)
-
-[원본 MP4 다운로드](assets/morai_v17/videos/v17_green_crossing_drive.mp4)
-
-#### STOP — green crossing, 8.5초
-
-![V17 STOP replay](assets/morai_v17/videos/v17_green_crossing_stop.gif)
-
-[원본 MP4 다운로드](assets/morai_v17/videos/v17_green_crossing_stop.mp4)
-
-#### AVOID — static-obstacle label 구간, 3.2초
-
-![V17 AVOID replay](assets/morai_v17/videos/v17_static_obstacle_avoid.gif)
-
-[원본 MP4 다운로드](assets/morai_v17/videos/v17_static_obstacle_avoid.mp4)
+Demo의 V17 GIF는 2026-08-18 fine-tuning best checkpoint의 실제 open-loop
+추론이다. 카메라 3대, LiDAR BEV, DRIVE/AVOID candidate, action probability,
+station별 speed를 함께 그린다. state queue, smoothing, MPC, TTC safety
+monitor는 적용 전이므로 폐루프 주행 결과로 해석하면 안 된다.
 
 ## 5. ROS/MPC 런타임 연결
 
