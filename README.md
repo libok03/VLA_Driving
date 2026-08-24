@@ -7,6 +7,20 @@
 
 raw bag, 변환 NPZ, 학습 출력, checkpoint는 용량 및 데이터 관리 문제로 Git에 포함하지 않습니다. 재현용 소스와 변환·학습 정책은 포함합니다.
 
+## V1 → V17 개발 흐름
+
+| 버전 | 핵심 시도 | 확인된 한계 / 다음 변경 |
+| --- | --- | --- |
+| V1–V2 | 카메라·LiDAR·ego·지도·route를 결합한 20점 trajectory prediction | GPS blackout과 멀티센서 입력 형상은 정리됐지만, 여러 입력이 경로 shortcut을 만들 수 있었다. |
+| V3 | target을 ego-relative `x,y,yaw,speed`로 명확화하고 거리 지표·outlier gallery 추가 | K=3 mode의 평균 경로와 선택 mode가 제어에 불안정할 수 있었다. |
+| V4–V5 | K=1, 위치·step·2차 차분·heading consistency loss, 0.1 m trajectory resampling | 지그재그는 줄었지만 시간 기반 trajectory와 실제 속도의 결합 문제가 남았다. |
+| V6 | DRIVE/STOP 상태를 분리해 정지 학습을 명시화 | STOP·DRIVE·AVOID의 적용을 모델 내부 routing에 맡기면 frame별 전환이 흔들릴 수 있었다. |
+| V7–V8 | local route 기준 Frenet lateral residual(`Δd`)과 속도 보정 시도 | route를 잘 따르지만 고속 곡선·처음 보는 장애물에서 route residual이 불안정했고, route 의존성이 강했다. |
+| V9–V10 | DRIVE/STOP/AVOID classifier와 `Δd, Δv` head를 분리 | 상태별 path 선택은 좋아졌지만 current speed 없이 시간 후 종방향 위치를 맞추려는 label 모순이 남았다. |
+| V11–V13 | candidate head, Beta speed distribution, Bench2Drive 사전학습·MORAI fine-tuning | domain adaptation은 개선됐지만 local route·ego/map 입력이 장면 shortcut으로 작동할 여지가 있었다. |
+| V14–V16 | 30 m goal, 분리된 path/speed/action head, 과적합·ablation 점검 | 고정 route 데이터에서 성능은 좋아졌으나 20점/시간 축 출력은 속도와 경로 형상을 계속 얽었다. |
+| **V17** | camera 3대 + LiDAR BEV + 단일 30 m goal만 입력, 3/6/10/15/22/30 m 고정 공간 경로 | 현재 선택 구조. route는 label 생성에만 쓰며, path·speed·state를 분리해 MPC 앞단에서 안전하게 조합한다. |
+
 ## MORAI V17: 현재 선택한 구조
 
 `src/multimodal_planner_v17_spatial30/`는 MORAI용 최종 실험 계보입니다. 입력은 최근 1초의 센서 history와 **30 m goal point**뿐입니다.
@@ -303,3 +317,9 @@ cos(yaw)
 ```
 
 LiDAR는 5개 요약값이 아니라 `/scan`의 360개 값을 사용합니다.
+
+## Runtime fallback과 안전 경계
+
+V17 또는 ROS2 모델의 출력을 조향·가감속 명령으로 직접 신뢰하지 않는다. planner 출력이 non-finite이거나, action confidence가 낮거나, state queue가 아직 안정화되지 않았거나, TTC safety monitor가 위험을 감지하면 학습 candidate를 적용하지 않는다. 이때 외부 state machine은 기본 global/local centerline과 보수적 속도 제한을 MPC에 전달하며, STOP 또는 충돌 위험이면 목표 속도를 0으로 강제한다.
+
+따라서 학습 모델은 기본 경로의 **보정 및 상황 판단 후보**를 제공하고, 차선 유지·급정지·충돌 회피의 최종 책임은 MPC와 safety monitor에 남긴다.
