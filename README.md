@@ -11,21 +11,9 @@ MORAI 환경에서 주어진 목표 방향으로 경로를 만들고, 정지·�
 
 ### Demo
 
-아래 V17 영상은 2026-08-18 MORAI fine-tuning best checkpoint의 open-loop
-bag replay다. 세 카메라, LiDAR BEV, DRIVE/AVOID candidate, action probability,
-station별 speed를 함께 그린다. runtime state queue, smoothing, MPC, TTC safety
-monitor는 아직 적용하지 않은 raw model output이다.
-
-- [V17 DRIVE — green-crossing 구간, 22.75초](assets/morai_v17/videos/v17_green_crossing_drive.mp4)
-- [V17 STOP — green-crossing 정지 구간, 8.5초](assets/morai_v17/videos/v17_green_crossing_stop.mp4)
-- [V17 AVOID — static-obstacle label 구간, 3.2초](assets/morai_v17/videos/v17_static_obstacle_avoid.mp4)
-
-비교용으로 기존 TCP/MPC baseline의 bag replay도 보관한다. 이 영상은 V17
-결과가 아니며, 속도 후처리·MPC 연결 형식의 참고용이다.
-
-- [TCP baseline — 파란불 직진 교차로 통과](assets/morai_v17/videos/green_crossing.mp4)
-- [TCP baseline — 일반 신호등 통과](assets/morai_v17/videos/green_signal_crossing.mp4)
-- [TCP baseline — 정적 장애물 구간 MPC 속도 preview](assets/morai_v17/videos/static_obstacle_speed_preview.mp4)
+V17 영상은 GitHub README에서 바로 보이도록 GIF로 삽입했다.
+[V17 bag replay](#v17-bag-replay)에서 DRIVE·STOP·AVOID 결과를 바로
+재생할 수 있다. MP4 원본은 각 GIF 아래의 다운로드 링크로만 제공한다.
 
 ## 2. 최종 시스템: MORAI V17
 
