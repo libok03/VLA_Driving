@@ -41,14 +41,14 @@ MORAI 환경에서 주어진 목표 방향으로 경로를 만들고, 정지·�
 
 ![TCP static obstacle speed preview](assets/morai_v17/videos/tcp_static_obstacle_speed_preview.gif)
 
-#### State-based open-loop bag replay
+#### State-based closed-loop driving
 
 GitHub 웹 플레이어가 MKV를 직접 재생하지 못할 수 있으므로 아래 링크에서 원본을
-내려받아 확인한다. 두 영상은 기록된 bag에 모델을 적용한 **open-loop 추론**이며,
-MPC·차량 동역학·Safety Monitor가 반영된 closed-loop 주행 결과가 아니다.
+내려받아 확인한다. 두 영상은 모델 출력이 실제 주행 경로와 상태 선택에 반영된
+**closed-loop 주행 결과**다.
 
-- [TCP state-only DRIVE / STOP open-loop 영상](assets/morai_v17/videos/TCP_state%20only_drive%2Cstop.mkv)
-- [V17 state-based open-loop 영상](assets/morai_v17/videos/v17_State_based.mkv)
+- [TCP state-only DRIVE / STOP closed-loop 영상](assets/morai_v17/videos/TCP_state%20only_drive%2Cstop.mkv)
+- [V17 state-based closed-loop 영상](assets/morai_v17/videos/v17_State_based.mkv)
 
 ## 2. 최종 시스템: MORAI V17
 
@@ -162,8 +162,7 @@ trajectory는 매 시점의 ego-relative 좌표이므로 이전 출력과 현재
 그대로 평균 내면 안 된다. 이전 경로를 pose 변화만큼 현재 ego frame으로
 변환한 뒤 state별 EMA를 적용한다.
 
-아래 내용은 두 open-loop 영상에 적용되어 closed-loop로 검증된 결과가 아니라,
-향후 ROS/MPC 통합 시 사용할 초기 runtime 정책 제안이다.
+아래 내용은 closed-loop 주행을 안정화하기 위한 state 기반 runtime 처리 원칙이다.
 
 | 상태 | 처리 |
 | --- | --- |
