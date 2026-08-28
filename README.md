@@ -25,9 +25,10 @@ MORAI 환경에서 주어진 목표 방향으로 경로를 만들고, 정지·�
 
 ![V17 AVOID replay](assets/morai_v17/videos/v17_static_obstacle_avoid.gif)
 
-#### TCP/MPC baseline bag replay
+#### TCP/MPC baseline open-loop bag replay
 
-아래 3개는 V17 결과가 아니라 비교용 TCP/MPC baseline이다.
+아래 3개는 V17 결과가 아니라 비교용 TCP/MPC baseline의 **open-loop bag
+replay**다. 실제 차량 동역학에 모델 출력을 되먹임한 closed-loop 결과가 아니다.
 
 **파란불 직진 교차로 통과**
 
@@ -45,7 +46,8 @@ MORAI 환경에서 주어진 목표 방향으로 경로를 만들고, 정지·�
 
 GitHub 웹 플레이어가 MKV를 직접 재생하지 못할 수 있으므로 아래 링크에서 원본을
 내려받아 확인한다. 두 영상은 모델 출력이 실제 주행 경로와 상태 선택에 반영된
-**closed-loop 주행 결과**다.
+**closed-loop 주행 결과**다. 이 문서에서 closed-loop로 분류하는 영상은 아래
+두 MKV뿐이며, 위의 GIF/MP4 bag replay와 구분한다.
 
 - [TCP state-only DRIVE / STOP closed-loop 영상](assets/morai_v17/videos/TCP_state%20only_drive%2Cstop.mkv)
 - [V17 state-based closed-loop 영상](assets/morai_v17/videos/v17_State_based.mkv)
