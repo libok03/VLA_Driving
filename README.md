@@ -49,8 +49,17 @@ GitHub 웹 플레이어가 MKV를 직접 재생하지 못할 수 있으므로 �
 **closed-loop 주행 결과**다. 이 문서에서 closed-loop로 분류하는 영상은 아래
 두 MKV뿐이며, 위의 GIF/MP4 bag replay와 구분한다.
 
-- [TCP state-only DRIVE / STOP closed-loop 영상](assets/morai_v17/videos/TCP_state%20only_drive%2Cstop.mkv)
-- [V17 state-based closed-loop 영상](assets/morai_v17/videos/v17_State_based.mkv)
+**TCP state-only DRIVE / STOP closed-loop**
+
+![TCP state-only DRIVE STOP closed-loop](assets/morai_v17/videos/tcp_state_only_drive_stop_closed_loop.gif)
+
+[원본 MKV 다운로드](assets/morai_v17/videos/TCP_state%20only_drive%2Cstop.mkv)
+
+**V17 state-based closed-loop**
+
+![V17 state-based closed-loop](assets/morai_v17/videos/v17_state_based_closed_loop.gif)
+
+[원본 MKV 다운로드](assets/morai_v17/videos/v17_State_based.mkv)
 
 ## 2. 최종 시스템: MORAI V17
 
