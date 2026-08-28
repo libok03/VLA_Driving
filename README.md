@@ -41,6 +41,14 @@ MORAI 환경에서 주어진 목표 방향으로 경로를 만들고, 정지·�
 
 ![TCP static obstacle speed preview](assets/morai_v17/videos/tcp_static_obstacle_speed_preview.gif)
 
+#### State-based runtime recordings
+
+GitHub 웹 플레이어가 MKV를 직접 재생하지 못할 수 있으므로 아래 링크에서 원본을
+내려받아 확인한다.
+
+- [TCP state-only DRIVE / STOP 주행 영상](assets/morai_v17/videos/TCP_state%20only_drive%2Cstop.mkv)
+- [V17 state-based 주행 영상](assets/morai_v17/videos/v17_State_based.mkv)
+
 ## 2. 최종 시스템: MORAI V17
 
 `src/multimodal_planner_v17_spatial30/`는 MORAI용 최종 실험 계보입니다. 입력은 최근 1초의 센서 history와 **30 m goal point**뿐입니다.
@@ -109,15 +117,75 @@ Demo의 V17 GIF는 2026-08-18 fine-tuning best checkpoint의 실제 open-loop
 station별 speed를 함께 그린다. state queue, smoothing, MPC, TTC safety
 monitor는 적용 전이므로 폐루프 주행 결과로 해석하면 안 된다.
 
-## 5. ROS/MPC 런타임 연결
+## 5. TCP state-only 모델
+
+TCP trajectory 성능을 유지하면서 상황 판단만 개선하기 위해, TCP MORAI V2의
+trajectory 기준 최적 checkpoint를 고정하고 카메라 feature에 연결된
+`DRIVE / STOP / AVOID` classification head만 추가 학습했다. TCP encoder,
+measurement branch, trajectory decoder와 BatchNorm running statistics는 모두
+고정했다. 따라서 V3의 trajectory 수치는 초기 TCP checkpoint와 같고, 변경된
+부분은 state classifier뿐이다.
+
+### Validation 결과
+
+| 항목 | 결과 |
+| --- | ---: |
+| State accuracy | 97.72% |
+| State macro-F1 | 95.95% |
+| 전체 ADE / FDE@2s | 0.674 m / 1.152 m |
+| DRIVE ADE | 0.943 m |
+| STOP ADE | 0.122 m |
+| AVOID ADE | 0.854 m |
+
+검증 confusion matrix는 actual row, predicted column이며 class 순서는
+`DRIVE / STOP / AVOID`이다.
+
+```text
+3480   32   10
+  76 1668    0
+   4    0   89
+```
+
+### Temporal stability 진단
+
+검증 5,359 sample을 확인했을 때, 단일 출력의 네 waypoint가
+좌→우→좌로 꺾이는 내부 지그재그는 0건이었다. 반면 가까운 연속 sample
+5,144쌍 중 GT lateral 변화가 0.5 m 미만인데 예측만 1 m 이상 바뀐 경우가
+35쌍(0.68%) 있었고, GT보다 예측 변화가 1 m 이상 과도한 경우는
+23쌍(0.45%)이었다. 즉 문제는 한 경로 내부 형상보다 single-frame TCP 출력의
+프레임 간 불연속에 가깝다.
+
+## 6. State-based smoothing과 ROS/MPC 연결
+
+trajectory는 매 시점의 ego-relative 좌표이므로 이전 출력과 현재 출력을
+그대로 평균 내면 안 된다. 이전 경로를 pose 변화만큼 현재 ego frame으로
+변환한 뒤 state별 EMA를 적용한다.
+
+초기 runtime 정책은 다음과 같다.
+
+| 상태 | 처리 |
+| --- | --- |
+| DRIVE | 새 예측 가중치 `alpha=0.20~0.30`으로 안정화 |
+| AVOID 진입 | `alpha=0.65~0.80`으로 빠르게 반응 |
+| AVOID 유지 | `alpha=0.35~0.50`으로 경로 진동 억제 |
+| STOP 진입 | 경로 EMA 대신 즉시 목표 속도 0, 마지막 안정 경로 유지 |
+| STOP 해제 | `alpha=0.15~0.25`로 서서히 DRIVE 복귀 |
+| 긴급 정지 | EMA와 state queue를 우회하고 Safety Monitor가 즉시 정지 |
+
+state probability에도 EMA와 비대칭 hysteresis를 둔다. STOP은 1~2 frame,
+AVOID는 2~3 frame 연속 확인 후 진입하고, DRIVE 복귀는 5~10 frame 연속
+확인한다.
+
+### ROS/MPC 처리 순서
 
 1. V17은 두 path candidate, speed candidate, action probability를 동시에 출력한다.
 2. state queue와 confidence threshold가 action을 안정화한다. 모델 내부 argmax가 곧바로 제어 명령이 되지 않는다.
 3. DRIVE는 기본 참조 경로를, AVOID는 회피 candidate를, STOP은 speed=0을 선택한다.
-4. 선택된 path는 origin 삽입, smoothing, 0.1 m resampling 후 MPC reference로 전달한다.
-5. TTC·충돌 임박 조건은 모델 선택보다 우선하는 external safety monitor가 처리한다.
+4. 이전 path를 현재 ego frame으로 변환한 뒤 state-dependent smoothing을 적용한다.
+5. 선택된 path는 origin 삽입, 0.1 m resampling 후 MPC reference로 전달한다.
+6. TTC·충돌 임박 조건은 모델 선택보다 우선하는 external safety monitor가 처리한다.
 
-## 6. 재현
+## 7. 재현
 
 ```bash
 pip install -e .
