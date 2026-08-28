@@ -9,59 +9,19 @@ raw bag, 변환 NPZ, 학습 출력, checkpoint는 용량 및 데이터 관리 �
 
 MORAI 환경에서 주어진 목표 방향으로 경로를 만들고, 정지·회피 상황을 분류한 뒤 MPC가 추종할 참조 경로와 속도 후보를 제공하는 것이 목표다. 모델은 제어 명령을 직접 확정하지 않으며, 상태 선택·경로 보간·안전 제한은 runtime 계층에서 수행한다.
 
-### Demo
+### 문서 구성
 
-#### V17 open-loop bag replay
+1. 프로젝트 개요
+2. 최종 시스템 설계
+3. 데이터셋과 변환
+4. 학습 및 정량 평가
+5. 정성 평가와 closed-loop 주행
+6. Runtime·MPC·안전 설계
+7. 재현 방법
+8. V1→V17 개발 과정
+9. Fallback과 안전 경계
 
-**DRIVE — green crossing, 22.75초**
-
-![V17 DRIVE replay](assets/morai_v17/videos/v17_green_crossing_drive.gif)
-
-**STOP — green crossing, 8.5초**
-
-![V17 STOP replay](assets/morai_v17/videos/v17_green_crossing_stop.gif)
-
-**AVOID — static-obstacle label 구간, 3.2초**
-
-![V17 AVOID replay](assets/morai_v17/videos/v17_static_obstacle_avoid.gif)
-
-#### TCP/MPC baseline open-loop bag replay
-
-아래 3개는 V17 결과가 아니라 비교용 TCP/MPC baseline의 **open-loop bag
-replay**다. 실제 차량 동역학에 모델 출력을 되먹임한 closed-loop 결과가 아니다.
-
-**파란불 직진 교차로 통과**
-
-![TCP green crossing](assets/morai_v17/videos/tcp_green_crossing.gif)
-
-**일반 신호등 통과**
-
-![TCP green signal crossing](assets/morai_v17/videos/tcp_green_signal_crossing.gif)
-
-**정적 장애물 구간 MPC 속도 preview**
-
-![TCP static obstacle speed preview](assets/morai_v17/videos/tcp_static_obstacle_speed_preview.gif)
-
-#### State-based closed-loop driving
-
-GitHub 웹 플레이어가 MKV를 직접 재생하지 못할 수 있으므로 아래 링크에서 원본을
-내려받아 확인한다. 두 영상은 모델 출력이 실제 주행 경로와 상태 선택에 반영된
-**closed-loop 주행 결과**다. 이 문서에서 closed-loop로 분류하는 영상은 아래
-두 MKV뿐이며, 위의 GIF/MP4 bag replay와 구분한다.
-
-**TCP state-only DRIVE / STOP closed-loop**
-
-![TCP state-only DRIVE STOP closed-loop](assets/morai_v17/videos/tcp_state_only_drive_stop_closed_loop.gif)
-
-[원본 MKV 다운로드](assets/morai_v17/videos/TCP_state%20only_drive%2Cstop.mkv)
-
-**V17 state-based closed-loop**
-
-![V17 state-based closed-loop](assets/morai_v17/videos/v17_state_based_closed_loop.gif)
-
-[원본 MKV 다운로드](assets/morai_v17/videos/v17_State_based.mkv)
-
-## 2. 최종 시스템: MORAI V17
+## 2. 최종 시스템 설계: MORAI V17
 
 `src/multimodal_planner_v17_spatial30/`는 MORAI용 최종 실험 계보입니다. 입력은 최근 1초의 센서 history와 **30 m goal point**뿐입니다.
 
@@ -107,7 +67,7 @@ VLP16 BEV     [B, 5, 3, 256, 256] ─── Light BEV CNN
 
 ![Bench2Drive → MORAI 표현 변환](assets/morai_v17/figures/bench2drive_conversion.png)
 
-## 4. 학습 및 검증 결과
+## 4. 학습 및 정량 평가
 
 2026-08-20 기준 MORAI validation 결과(고정 3/6/10/15/22/30 m 축)는 아래와 같다. 이는 open-loop 검증이며, 최종 판단은 bag replay와 MPC 폐루프 시험으로 한다.
 
@@ -122,14 +82,13 @@ VLP16 BEV     [B, 5, 3, 256, 256] ─── Light BEV CNN
 
 AVOID recall은 높지만 DRIVE를 AVOID로 판정하는 보수적 오탐이 아직 존재한다. 따라서 실제 runtime에서는 raw argmax를 즉시 적용하지 않고 state queue, confidence threshold, TTC 기반 safety monitor를 함께 사용해야 한다. 이 수치는 차선 이탈·충돌이 없다는 보증이 아니다.
 
-### V17 bag replay 해석
+### 4.1 V17 정량 결과 해석
 
-Demo의 V17 GIF는 2026-08-18 fine-tuning best checkpoint의 실제 open-loop
-추론이다. 카메라 3대, LiDAR BEV, DRIVE/AVOID candidate, action probability,
-station별 speed를 함께 그린다. state queue, smoothing, MPC, TTC safety
-monitor는 적용 전이므로 폐루프 주행 결과로 해석하면 안 된다.
+이 수치는 2026-08-18 fine-tuning best checkpoint의 open-loop validation
+결과다. 제한된 검증 split에서 경로·속도·상태를 측정한 값이므로, 실제 제어
+안정성은 5장의 closed-loop 결과와 함께 판단한다.
 
-## 5. TCP state-only 모델
+### 4.2 TCP state-only 비교 모델
 
 TCP trajectory 성능을 유지하면서 상황 판단만 개선하기 위해, TCP MORAI V2의
 trajectory 기준 최적 checkpoint를 고정하고 카메라 feature에 연결된
@@ -138,7 +97,7 @@ measurement branch, trajectory decoder와 BatchNorm running statistics는 모두
 고정했다. 따라서 V3의 trajectory 수치는 초기 TCP checkpoint와 같고, 변경된
 부분은 state classifier뿐이다.
 
-### Validation 결과
+#### Validation 결과
 
 | 항목 | 결과 |
 | --- | ---: |
@@ -158,7 +117,7 @@ measurement branch, trajectory decoder와 BatchNorm running statistics는 모두
    4    0   89
 ```
 
-### Temporal stability 진단
+#### Temporal stability 진단
 
 검증 5,359 sample을 확인했을 때, 단일 출력의 네 waypoint가
 좌→우→좌로 꺾이는 내부 지그재그는 0건이었다. 반면 가까운 연속 sample
@@ -167,7 +126,54 @@ measurement branch, trajectory decoder와 BatchNorm running statistics는 모두
 23쌍(0.45%)이었다. 즉 문제는 한 경로 내부 형상보다 single-frame TCP 출력의
 프레임 간 불연속에 가깝다.
 
-## 6. State-based smoothing과 ROS/MPC 연결 제안
+## 5. 정성 평가와 closed-loop 주행
+
+정량 지표만으로는 경로 형상, 상태 전환 시점, MPC가 실제로 경로를 추종할 수
+있는지를 판단할 수 없다. 따라서 기록된 bag을 이용한 open-loop 추론과 모델
+출력을 차량 제어에 되먹임한 closed-loop 주행을 분리해 평가했다.
+
+### 5.1 V17 open-loop bag replay
+
+아래 결과는 카메라 3대, LiDAR BEV, DRIVE/AVOID candidate, action probability,
+station별 speed를 함께 표시한 open-loop 추론이다. state queue, MPC와 차량
+동역학은 평가에 포함되지 않는다.
+
+| DRIVE | STOP | AVOID |
+| --- | --- | --- |
+| ![V17 DRIVE replay](assets/morai_v17/videos/v17_green_crossing_drive.gif) | ![V17 STOP replay](assets/morai_v17/videos/v17_green_crossing_stop.gif) | ![V17 AVOID replay](assets/morai_v17/videos/v17_static_obstacle_avoid.gif) |
+
+### 5.2 TCP/MPC baseline open-loop bag replay
+
+아래 영상은 V17 결과가 아니라 비교용 TCP/MPC baseline의 open-loop 결과다.
+
+| 파란불 직진 | 일반 신호등 | 정적 장애물 속도 preview |
+| --- | --- | --- |
+| ![TCP green crossing](assets/morai_v17/videos/tcp_green_crossing.gif) | ![TCP green signal crossing](assets/morai_v17/videos/tcp_green_signal_crossing.gif) | ![TCP static obstacle speed preview](assets/morai_v17/videos/tcp_static_obstacle_speed_preview.gif) |
+
+### 5.3 State-based closed-loop 주행
+
+다음 두 영상만 모델 출력이 실제 주행 경로와 상태 선택에 반영된 closed-loop
+결과다. 위의 open-loop bag replay와 구분한다.
+
+#### TCP state-only DRIVE / STOP
+
+![TCP state-only DRIVE STOP closed-loop](assets/morai_v17/videos/tcp_state_only_drive_stop_closed_loop.gif)
+
+[원본 MKV 다운로드](assets/morai_v17/videos/TCP_state%20only_drive%2Cstop.mkv)
+
+#### V17 state-based
+
+![V17 state-based closed-loop](assets/morai_v17/videos/v17_state_based_closed_loop.gif)
+
+[원본 MKV 다운로드](assets/morai_v17/videos/v17_State_based.mkv)
+
+두 closed-loop 영상은 상태 판단과 경로 출력을 실제 제어 계층에 연결할 수 있음을
+보여준다. 다만 제한된 MORAI 코스의 실험 결과이며, 처음 보는 장애물과 더 다양한
+교차로에 대한 일반화를 보증하지는 않는다.
+
+## 6. Runtime·MPC·안전 설계
+
+### 6.1 State-based smoothing
 
 trajectory는 매 시점의 ego-relative 좌표이므로 이전 출력과 현재 출력을
 그대로 평균 내면 안 된다. 이전 경로를 pose 변화만큼 현재 ego frame으로
@@ -188,7 +194,7 @@ state probability에도 EMA와 비대칭 hysteresis를 둔다. STOP은 1~2 frame
 AVOID는 2~3 frame 연속 확인 후 진입하고, DRIVE 복귀는 5~10 frame 연속
 확인한다.
 
-### ROS/MPC 처리 순서
+### 6.2 ROS/MPC 처리 순서
 
 1. V17은 두 path candidate, speed candidate, action probability를 동시에 출력한다.
 2. state queue와 confidence threshold가 action을 안정화한다. 모델 내부 argmax가 곧바로 제어 명령이 되지 않는다.
@@ -197,7 +203,7 @@ AVOID는 2~3 frame 연속 확인 후 진입하고, DRIVE 복귀는 5~10 frame �
 5. 선택된 path는 origin 삽입, 0.1 m resampling 후 MPC reference로 전달한다.
 6. TTC·충돌 임박 조건은 모델 선택보다 우선하는 external safety monitor가 처리한다.
 
-## 7. 재현
+## 7. 재현 방법
 
 ```bash
 pip install -e .
@@ -211,237 +217,8 @@ PYTHONPATH=src python -m multimodal_planner_v17_spatial30.train --help
 
 V17은 `multimodal_planner_v9`, `v10`, `v13_goal_trajectory`, `v16_30m_candidates`의 공통 encoder·loss·metric 계보를 사용한다. 이 때문에 해당 소스도 `src/`에 함께 포함했다. raw MORAI/Bench2Drive 데이터 변환 결과와 pretrained weights는 별도 저장소 또는 로컬 SSD에서 관리한다.
 
----
 
-## Appendix A. Legacy ROS2 motor-control
-
-현재 기준 입력은 아래 네 가지입니다.
-
-```text
-/usb_cam/image_raw/front    카메라 원본 이미지
-/scan                       360개 LiDAR 거리값
-/scan_odom_map              현재 위치와 yaw
-/xycar_motor                사람이 조종한 정답 angle/speed
-```
-
-모델 구조는 아래와 같습니다.
-
-```text
-image[3,224,224] -> pretrained ResNet18
-lidar[360]
-pose[4] = relative_x, relative_y, sin(yaw), cos(yaw)
-
-최근 5프레임 -> GRU -> [steering, speed]
-```
-
-실시간 실행 시 모델 출력은 `/xycar_motor`로 publish됩니다.
-
-### 파일
-
-```text
-configs/motor_control_temporal_camera.yaml
-    학습과 추론 설정
-
-scripts/extract_sqlite_motor_bag.py
-    ROS2 sqlite bag에서 image, lidar, pose, motor label 추출
-
-scripts/train_motor_control_temporal_camera.py
-    ResNet18 + GRU 모델 학습
-
-scripts/infer_motor_control_temporal_camera.py
-    ROS2 topic을 받아 실시간으로 /xycar_motor publish
-
-src/vla_driving/data/motor_temporal_image_dataset.py
-    이미지 sequence dataset
-
-src/vla_driving/models/motor_temporal_camera.py
-    ResNet18 image encoder + GRU 모델
-```
-
-### 설치
-
-repo 루트에서 실행합니다.
-
-```bash
-pip install -e .
-```
-
-ROS2 환경에서 실행할 때는 매 터미널마다 source합니다.
-
-```bash
-source /opt/ros/humble/setup.bash
-source ~/xycar_ws/install/setup.bash
-export PYTHONPATH=$PWD/src:$PYTHONPATH
-```
-
-### Bag Topic 확인
-
-bag 안에 필요한 topic이 있는지 먼저 확인합니다.
-
-```bash
-sqlite3 BAG.db3 "select name,type from topics;"
-```
-
-필요 topic:
-
-```text
-/usb_cam/image_raw/front
-/scan
-/scan_odom_map
-/xycar_motor
-```
-
-### Bag 추출
-
-단일 bag:
-
-```bash
-python scripts/extract_sqlite_motor_bag.py raw_bags/kookmin/driving_data \
-  --output-dir data/motor_camera_pose/extracted/driving_data \
-  --sample-hz 10 \
-  --image-topic /usb_cam/image_raw/front \
-  --pose-topic /scan_odom_map
-```
-
-여러 bag:
-
-```bash
-rm -rf data/motor_camera_pose
-mkdir -p data/motor_camera_pose/extracted
-
-for bag in raw_bags/kookmin/driving_data*; do
-  [ -d "$bag" ] || continue
-  name=$(basename "$bag")
-  python scripts/extract_sqlite_motor_bag.py "$bag" \
-    --output-dir "data/motor_camera_pose/extracted/$name" \
-    --sample-hz 10 \
-    --image-topic /usb_cam/image_raw/front \
-    --pose-topic /scan_odom_map
-done
-```
-
-추출 결과:
-
-```text
-data/motor_camera_pose/extracted/<bag_name>/manifest.jsonl
-data/motor_camera_pose/extracted/<bag_name>/images/*.jpg
-data/motor_camera_pose/extracted/<bag_name>/lidar/*.npy
-```
-
-### Train/Val Split 생성
-
-```bash
-mapfile -t dirs < <(find data/motor_camera_pose/extracted -mindepth 1 -maxdepth 1 -type d | sort -V)
-
-n=${#dirs[@]}
-val_count=$(( n / 5 ))
-[ "$val_count" -lt 1 ] && val_count=1
-train_count=$(( n - val_count ))
-
-python scripts/build_dataset_split.py \
-  --output-dir data/motor_camera_pose \
-  --train "${dirs[@]:0:$train_count}" \
-  --val "${dirs[@]:$train_count}"
-```
-
-생성 결과:
-
-```text
-data/motor_camera_pose/train.jsonl
-data/motor_camera_pose/val.jsonl
-```
-
-### 학습
-
-설정 파일에서 dataset 경로와 checkpoint 경로를 맞춥니다.
-
-```yaml
-data:
-  data_root: data/motor_camera_pose
-  train_manifest: data/motor_camera_pose/train.jsonl
-  val_manifest: data/motor_camera_pose/val.jsonl
-
-model:
-  image_size: [224, 224]
-  sequence_length: 5
-  camera_pretrained: true
-
-train:
-  batch_size: 32
-
-checkpoint_dir: checkpoints/motor_control_temporal_camera
-```
-
-학습 실행:
-
-```bash
-python scripts/train_motor_control_temporal_camera.py \
-  --config configs/motor_control_temporal_camera.yaml
-```
-
-결과:
-
-```text
-checkpoints/motor_control_temporal_camera/best.pt
-```
-
-GPU 메모리가 부족하면 batch size를 낮춥니다.
-
-```bash
-sed -i 's/batch_size: 32/batch_size: 16/' configs/motor_control_temporal_camera.yaml
-```
-
-pretrained ResNet18은 처음 실행할 때 torchvision weight를 다운로드할 수 있습니다. 서버에 인터넷이 없으면 weight cache를 옮기거나, 임시 확인용으로 `camera_pretrained: false`를 사용할 수 있습니다.
-
-### ROS2 실시간 추론
-
-```bash
-source /opt/ros/humble/setup.bash
-source ~/xycar_ws/install/setup.bash
-export PYTHONPATH=$PWD/src:$PYTHONPATH
-
-python scripts/infer_motor_control_temporal_camera.py \
-  --config configs/motor_control_temporal_camera.yaml \
-  --checkpoint checkpoints/motor_control_temporal_camera/best.pt
-```
-
-구독:
-
-```text
-/usb_cam/image_raw/front
-/scan
-/scan_odom_map
-```
-
-발행:
-
-```text
-/xycar_motor
-/vla_driving/steering
-/vla_driving/speed
-```
-
-확인:
-
-```bash
-ros2 topic echo /xycar_motor --once
-ros2 topic info /xycar_motor -v
-```
-
-### 메모
-
-위치 입력은 절대 좌표를 그대로 넣지 않고 첫 프레임 기준 상대 위치로 바꿔 사용합니다.
-
-```text
-relative_x = x - first_x
-relative_y = y - first_y
-sin(yaw)
-cos(yaw)
-```
-
-LiDAR는 5개 요약값이 아니라 `/scan`의 360개 값을 사용합니다.
-
-## 7. 개발 이력: V1 → V17과 변경 이유
+## 8. 개발 과정: V1 → V17과 변경 이유
 
 이 절은 현재 V17 구조가 만들어진 순서를 기록한다. 각 버전에서 잘되지
 않았던 지점을 다음 버전의 설계 변경으로 연결한다.
@@ -567,9 +344,9 @@ current speed가 없어도 path geometry label은 모순되지 않는다. local 
 현재 검증 지표는 본문 표와 같고, 남은 과제는 폐루프 MPC 평가와 처음 보는
 장애물에 대한 AVOID 일반화다.
 
-## 8. Runtime fallback과 안전 경계
+## 9. Fallback과 안전 경계
 
-V17 또는 legacy ROS2 모델의 출력을 조향·가감속 명령으로 직접 신뢰하지
+V17 또는 TCP state 모델의 출력을 조향·가감속 명령으로 직접 신뢰하지
 않는다. planner 출력이 non-finite이거나, action confidence가 낮거나,
 state queue가 아직 안정화되지 않았거나, TTC safety monitor가 위험을
 감지하면 학습 candidate를 적용하지 않는다.
