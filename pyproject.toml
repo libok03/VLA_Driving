@@ -21,6 +21,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.5"]
 yolo = ["ultralytics>=8.0"]
+morai = ["rosbags>=0.10"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

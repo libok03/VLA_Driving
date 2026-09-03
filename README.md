@@ -126,6 +126,73 @@ measurement branch, trajectory decoder와 BatchNorm running statistics는 모두
 23쌍(0.45%)이었다. 즉 문제는 한 경로 내부 형상보다 single-frame TCP 출력의
 프레임 간 불연속에 가깝다.
 
+### 4.3 TCP full-policy MORAI 재학습
+
+TCP state-only 실험은 pretrained trajectory를 보존한 채 classifier만 학습했기
+때문에 MORAI 사람 주행의 직접 제어를 배우지 않았다. 다음 단계에서는 공개 TCP
+재현 checkpoint에 들어 있는 Roach-distilled driving prior를 **초기화로만** 사용하고,
+frozen teacher, feature/value distillation, teacher action KL을 모두 제거했다. ResNet34
+encoder부터 trajectory-guided direct-control branch까지 풀어 MORAI 사람 주행 label로
+policy 전체를 다시 학습했다.
+
+```text
+TCP checkpoint (initialization only)
+                 │
+Front RGB 3×256×900 + speed + target point + command
+                 │
+      fully trainable ResNet34 encoder
+                 ├─ trajectory branch → 4 waypoints (0.6/1.0/1.6/2.0 s)
+                 ├─ current Beta control → signed acceleration, steering
+                 ├─ trajectory-guided recurrent control → 4 future controls
+                 └─ auxiliary current-speed prediction
+```
+
+별도 `/Ctrl_cmd`가 없는 bag은 `/morai/ego_vehicle_status`의 실제 적용
+`accel`, `brake`, `steer`를 ROS timestamp로 camera frame에 정렬했다. signed acceleration은
+우세한 brake를 음수로, throttle을 양수로 표현하며 steering은 MORAI의 ±40°를
+`[-1,1]`로 정규화했다. 원본 bag이 남아 있는 188/229개 source를 사용할 수 있었고,
+effective split은 train 28,223 / validation 2,613 sample이다. source run 기준
+train/validation/test 중복은 없다.
+
+#### 최종 validation 결과
+
+| 항목 | Epoch 2 | Epoch 10 best |
+| --- | ---: | ---: |
+| 전체 ADE / FDE@2s | 0.437 / 0.750 m | **0.391 / 0.664 m** |
+| state macro ADE | 0.577 m | **0.521 m** |
+| DRIVE ADE / FDE@2s | 0.848 / 1.454 m | **0.769 / 1.302 m** |
+| STOP ADE / FDE@2s | 0.059 / 0.105 m | **0.044 / 0.079 m** |
+| AVOID ADE / FDE@2s | 0.823 / 1.380 m | **0.751 / 1.240 m** |
+| DRIVE current steer MAE | 0.285 | **0.247** |
+| AVOID current steer MAE | 0.364 | **0.321** |
+
+전체 ADE만 보면 STOP이 validation의 52%를 차지해 성능이 과도하게 좋아 보인다.
+따라서 checkpoint 비교에는 state macro ADE와 DRIVE/AVOID 분리 지표를 사용했다.
+AVOID steering MAE 0.321은 약 12.8°이므로 open-loop 경로 지표가 좋아도 direct
+control 회피를 바로 안전하다고 판단할 수 없다. epoch별 원본 결과는
+[`results/tcp_morai_full_policy_v1/`](results/tcp_morai_full_policy_v1/)에 보관한다.
+
+#### 실제 입력 전처리 확인
+
+원본 TCP control attention은 ResNet feature map을 8×29로 고정해 256×900 입력을
+요구한다. MORAI 640×360 front frame은 crop 없이 900×256으로 강제 resize되므로
+내용은 사라지지 않지만 가로로 늘고 세로로 눌린다. 이는 현재 실험의 명시적인
+domain/preprocessing 한계이며 향후 aspect-preserving adapter 또는 attention
+shape 변경으로 비교해야 한다.
+
+| 일반 DRIVE 입력 | 빨간불 STOP 입력 |
+| --- | --- |
+| ![TCP actual input](assets/tcp_full_policy_v1/figures/original_vs_actual_tcp_input.png) | ![TCP stop input](assets/tcp_full_policy_v1/figures/original_vs_actual_tcp_input_stop.png) |
+
+#### Open-loop bag replay
+
+- [한 바퀴 DRIVE 추론 영상](assets/tcp_full_policy_v1/videos/epoch_010_best_one_lap.mp4)
+- [DRIVE / STOP / AVOID 포함 추론 영상](assets/tcp_full_policy_v1/videos/epoch_010_drive_stop_avoid_full_camera.mp4)
+
+두 영상은 recorded bag을 재생한 **open-loop** 결과다. 아래 5.3절의 두
+closed-loop 주행과 구분하며, 영상의 검은 제목 바는 카메라 아래로 배치해 상단
+신호등을 가리지 않도록 수정했다.
+
 ## 5. 정성 평가와 closed-loop 주행
 
 정량 지표만으로는 경로 형상, 상태 전환 시점, MPC가 실제로 경로를 추종할 수
@@ -213,6 +280,12 @@ PYTHONPATH=src python -m unittest multimodal_planner_v17_spatial30.test_v17
 
 # dataset manifest와 checkpoint 경로를 준비한 뒤
 PYTHONPATH=src python -m multimodal_planner_v17_spatial30.train --help
+
+# TCP full-policy control cache and training
+pip install -e '.[morai]'
+PYTHONPATH=src python scripts/build_tcp_morai_control_cache.py --help
+PYTHONPATH=src python -m tcp_morai_finetune.train_full_policy --help
+PYTHONPATH=src python -m tcp_morai_finetune.evaluate_full_policy_by_state --help
 ```
 
 V17은 `multimodal_planner_v9`, `v10`, `v13_goal_trajectory`, `v16_30m_candidates`의 공통 encoder·loss·metric 계보를 사용한다. 이 때문에 해당 소스도 `src/`에 함께 포함했다. raw MORAI/Bench2Drive 데이터 변환 결과와 pretrained weights는 별도 저장소 또는 로컬 SSD에서 관리한다.

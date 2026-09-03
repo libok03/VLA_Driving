@@ -1,0 +1,53 @@
+{
+  "checkpoint": "/home/libok/morai_project/training_outputs/tcp_morai_full_policy_v1/epoch_007.pt",
+  "checkpoint_epoch": 7,
+  "split": "val",
+  "macro_ade_m": 0.5405985706646487,
+  "states": {
+    "DRIVE": {
+      "count": 1178,
+      "ade_m": 0.7781074849670477,
+      "fde_2s_m": 1.3227975923055704,
+      "per_horizon_error_m": {
+        "0.6s": 0.2787689221785712,
+        "1s": 0.5383669089000982,
+        "1.6s": 0.9724965164839513,
+        "2s": 1.3227975923055704
+      },
+      "current_accel_mae": 0.33741088436698263,
+      "current_steer_mae": 0.2578628909203314,
+      "future_accel_mae": 0.38908935278805895,
+      "future_steer_mae": 0.33336663750871537
+    },
+    "STOP": {
+      "count": 1359,
+      "ade_m": 0.06661212776290394,
+      "fde_2s_m": 0.1278339013223611,
+      "per_horizon_error_m": {
+        "0.6s": 0.02648433018270181,
+        "1s": 0.03287215487904041,
+        "1.6s": 0.07925812466751245,
+        "2s": 0.1278339013223611
+      },
+      "current_accel_mae": 0.062117020815413516,
+      "current_steer_mae": 0.0028567026870227894,
+      "future_accel_mae": 0.09434775239496743,
+      "future_steer_mae": 0.0029126827531741595
+    },
+    "AVOID": {
+      "count": 76,
+      "ade_m": 0.7770760992639942,
+      "fde_2s_m": 1.2852466835787422,
+      "per_horizon_error_m": {
+        "0.6s": 0.29766756688293655,
+        "1s": 0.5719248103468042,
+        "1.6s": 0.9534653362474943,
+        "2s": 1.2852466835787422
+      },
+      "current_accel_mae": 0.25504280705201,
+      "current_steer_mae": 0.32486653327941895,
+      "future_accel_mae": 0.3591529134857027,
+      "future_steer_mae": 0.4115437747616517
+    }
+  }
+}
