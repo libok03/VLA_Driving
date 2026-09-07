@@ -11,6 +11,7 @@ dist/
 *.egg-info/
 
 /data/
+raw_bags/
 checkpoints/
 runs/
 wandb/

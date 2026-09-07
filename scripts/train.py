@@ -26,18 +26,29 @@ def build_dataset(cfg: dict, split: str) -> DrivingDataset:
         data_root=data_cfg["data_root"],
         manifest_path=data_cfg[manifest_key],
         image_size=tuple(data_cfg["image_size"]),
+        perception_dim=data_cfg["perception_dim"],
         lidar_size=data_cfg["lidar_size"],
         route_points=data_cfg["route_points"],
         waypoint_count=data_cfg["waypoint_count"],
         waypoint_dim=data_cfg.get("waypoint_dim", 2),
+        use_route=bool(data_cfg.get("use_route", True)),
     )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/base.yaml")
+    parser.add_argument("--data-root", default="")
+    parser.add_argument("--train-manifest", default="")
+    parser.add_argument("--val-manifest", default="")
     args = parser.parse_args()
     cfg = load_config(args.config)
+    if args.data_root:
+        cfg["data"]["data_root"] = args.data_root
+    if args.train_manifest:
+        cfg["data"]["train_manifest"] = args.train_manifest
+    if args.val_manifest:
+        cfg["data"]["val_manifest"] = args.val_manifest
 
     torch.manual_seed(cfg["seed"])
     device = resolve_device(cfg["device"])
@@ -89,20 +100,20 @@ def run_epoch(
     total_loss = 0.0
     total_count = 0
     for batch in tqdm(loader, leave=False):
-        image = batch["image"].to(device)
+        perception = batch["perception"].to(device)
         lidar = batch["lidar"].to(device)
         pose = batch["pose"].to(device)
         route = batch["route"].to(device)
         target = batch["waypoints"].to(device)
 
-        pred = model(image, lidar, pose, route)
+        pred = model(perception, lidar, pose, route)
         loss = loss_fn(pred, target)
         if optimizer is not None:
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
 
-        batch_size = image.shape[0]
+        batch_size = perception.shape[0]
         total_loss += float(loss.item()) * batch_size
         total_count += batch_size
     return total_loss / max(total_count, 1)

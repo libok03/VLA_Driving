@@ -1,0 +1,120 @@
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import torch
+from torch import nn
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+from vla_driving.data.motor_control_dataset import MotorControlDataset
+from vla_driving.models.motor_control import build_motor_control_model
+from vla_driving.utils.config import load_config
+
+
+def resolve_device(name: str) -> torch.device:
+    if name == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device(name)
+
+
+def build_dataset(cfg: dict, split: str, max_samples: int = 0) -> MotorControlDataset:
+    data_cfg = cfg["data"]
+    label_cfg = cfg["labels"]
+    manifest_key = "train_manifest" if split == "train" else "val_manifest"
+    return MotorControlDataset(
+        data_root=data_cfg["data_root"],
+        manifest_path=data_cfg[manifest_key],
+        perception_dim=data_cfg["perception_dim"],
+        lidar_size=data_cfg["lidar_size"],
+        steering_limit=label_cfg["steering_limit"],
+        speed_limit=label_cfg["speed_limit"],
+        lidar_max_range=data_cfg.get("lidar_max_range", 10.0),
+        use_lidar_summary=data_cfg.get("use_lidar_summary", True),
+        max_samples=max_samples,
+    )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Train direct xycar motor angle/speed model.")
+    parser.add_argument("--config", default="configs/motor_control.yaml")
+    parser.add_argument("--overfit-samples", type=int, default=0)
+    args = parser.parse_args()
+
+    cfg = load_config(args.config)
+    torch.manual_seed(cfg["seed"])
+    device = resolve_device(cfg["device"])
+    model = build_motor_control_model(cfg["model"]).to(device)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=cfg["train"]["lr"],
+        weight_decay=cfg["train"]["weight_decay"],
+    )
+    loss_fn = nn.SmoothL1Loss()
+
+    train_dataset = build_dataset(cfg, "train", max_samples=args.overfit_samples)
+    val_dataset = build_dataset(cfg, "val")
+    if len(train_dataset) == 0 or len(val_dataset) == 0:
+        raise SystemExit("No motor-labeled samples found. Re-extract bags with --require-motor-label.")
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=min(cfg["train"]["batch_size"], max(len(train_dataset), 1)),
+        shuffle=True,
+        num_workers=cfg["train"]["num_workers"],
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=cfg["train"]["batch_size"],
+        shuffle=False,
+        num_workers=cfg["train"]["num_workers"],
+    )
+
+    checkpoint_dir = Path(cfg["train"]["checkpoint_dir"])
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    best_val = float("inf")
+
+    for epoch in range(1, cfg["train"]["epochs"] + 1):
+        model.train()
+        train_loss = run_epoch(model, train_loader, loss_fn, device, optimizer)
+        model.eval()
+        with torch.no_grad():
+            val_loss = run_epoch(model, val_loader, loss_fn, device)
+
+        print(f"epoch={epoch} train_loss={train_loss:.5f} val_loss={val_loss:.5f}")
+        if val_loss < best_val:
+            best_val = val_loss
+            torch.save(model.state_dict(), checkpoint_dir / "best.pt")
+
+
+def run_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    loss_fn: nn.Module,
+    device: torch.device,
+    optimizer: torch.optim.Optimizer | None = None,
+) -> float:
+    total_loss = 0.0
+    total_count = 0
+    for batch in tqdm(loader, leave=False):
+        perception = batch["perception"].to(device)
+        lidar_key = "lidar_summary" if "lidar_summary" in batch else "lidar"
+        lidar = batch[lidar_key].to(device)
+        target = batch["target"].to(device)
+
+        pred = model(perception, lidar)
+        loss = loss_fn(pred, target)
+        if optimizer is not None:
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+
+        batch_size = perception.shape[0]
+        total_loss += float(loss.item()) * batch_size
+        total_count += batch_size
+    return total_loss / max(total_count, 1)
+
+
+if __name__ == "__main__":
+    main()
