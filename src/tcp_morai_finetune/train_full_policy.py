@@ -36,6 +36,24 @@ def args() -> argparse.Namespace:
     p.add_argument("--speed-weight", type=float, default=0.05)
     p.add_argument("--log-every", type=int, default=100)
     p.add_argument("--seed", type=int, default=2026)
+    p.add_argument(
+        "--sampling-profile",
+        choices=("standard", "hard-events"),
+        default="standard",
+    )
+    p.add_argument(
+        "--selection-profile",
+        choices=("overall", "hard-events"),
+        default="overall",
+    )
+    p.add_argument("--signal-visibility-cache", type=Path)
+    p.add_argument(
+        "--hard-event-fractions",
+        type=float,
+        nargs="+",
+        metavar="FRACTION",
+        default=(0.25, 0.25, 0.20, 0.15, 0.15),
+    )
     p.add_argument("--cpu", action="store_true")
     return p.parse_args()
 
@@ -53,6 +71,8 @@ class Metrics:
     def __init__(self) -> None:
         self.n = 0; self.sums: dict[str, float] = {}
         self.horizon = torch.zeros(4, dtype=torch.float64)
+        self.group_n: dict[str, int] = {}
+        self.group_sums: dict[str, dict[str, float]] = {}
 
     def update(self, output, batch, terms) -> None:
         n = int(batch["image"].shape[0]); self.n += n
@@ -63,10 +83,37 @@ class Metrics:
         future = torch.stack([beta_action(a, b) for a, b in zip(output["future_alpha"], output["future_beta"])], 1)
         self.sums["current_control_mae"] = self.sums.get("current_control_mae", 0.0) + float(F.l1_loss(current, batch["current_control"].float()).detach().cpu()) * n
         self.sums["future_control_mae"] = self.sums.get("future_control_mae", 0.0) + float(F.l1_loss(future, batch["future_control"].float()).detach().cpu()) * n
+        if "signal_window" in batch:
+            action = batch["action_state"]
+            signal = batch.get("signal_visible", batch["signal_window"]).bool()
+            groups = {
+                "avoid": action == 2,
+                "avoid_approach": batch.get("avoid_approach", torch.zeros_like(action, dtype=torch.bool)).bool(),
+                "signal_drive": signal & (action == 0),
+                "signal_stop": signal & (action == 1),
+                "general_replay": (~signal) & (action != 2) & (~batch.get("avoid_approach", torch.zeros_like(action, dtype=torch.bool)).bool()),
+            }
+            per_ade = distance.mean(dim=1)
+            per_current = (current - batch["current_control"].float()).abs().mean(dim=1).detach().cpu().double()
+            per_future = (future - batch["future_control"].float()).abs().mean(dim=(1, 2)).detach().cpu().double()
+            for name, mask_device in groups.items():
+                mask = mask_device.detach().cpu().bool()
+                count = int(mask.sum())
+                if not count:
+                    continue
+                self.group_n[name] = self.group_n.get(name, 0) + count
+                sums = self.group_sums.setdefault(name, {"ade_m": 0.0, "current_control_mae": 0.0, "future_control_mae": 0.0})
+                sums["ade_m"] += float(per_ade[mask].sum())
+                sums["current_control_mae"] += float(per_current[mask].sum())
+                sums["future_control_mae"] += float(per_future[mask].sum())
 
     def compute(self):
         h = self.horizon / max(self.n, 1)
-        return {**{k: v/max(self.n,1) for k,v in self.sums.items()}, "ade_m": float(h.mean()), "fde_2s_m": float(h[-1]), "per_horizon_error_m": {f"{s:g}s": float(h[i]) for i,s in enumerate(WAYPOINT_HORIZONS_S)}}
+        groups = {
+            name: {"count": self.group_n[name], **{key: value / self.group_n[name] for key, value in sums.items()}}
+            for name, sums in self.group_sums.items()
+        }
+        return {**{k: v/max(self.n,1) for k,v in self.sums.items()}, "ade_m": float(h.mean()), "fde_2s_m": float(h[-1]), "per_horizon_error_m": {f"{s:g}s": float(h[i]) for i,s in enumerate(WAYPOINT_HORIZONS_S)}, "hard_event_metrics": groups}
 
 
 def losses(output, batch, cfg):
@@ -106,7 +153,21 @@ def main() -> None:
     (cfg.output_dir/"effective_split.json").write_text(json.dumps(filtered,indent=2))
     train=TCPMoraiDataset(cfg.data_root,filtered["train"],True,"strong",cfg.control_cache)
     val=TCPMoraiDataset(cfg.data_root,filtered["val"],False,"standard",cfg.control_cache)
-    sampler=WeightedRandomSampler(torch.from_numpy(train.sampling_weights()),len(train),replacement=True,generator=torch.Generator().manual_seed(cfg.seed))
+    if cfg.signal_visibility_cache is not None:
+        for part, dataset in (("train", train), ("val", val)):
+            cache_path = cfg.signal_visibility_cache / f"{part}.npz"
+            with np.load(cache_path, allow_pickle=False) as cache:
+                cached_runs = cache["run_ids"].astype(str).tolist()
+                actual_runs = [run.run_id for run in dataset.runs]
+                if cached_runs != actual_runs:
+                    raise ValueError(f"{cache_path}: run order does not match dataset")
+                dataset.set_signal_visibility(cache["signal_visible"])
+    sampling_weights = (
+        train.hard_event_sampling_weights(tuple(cfg.hard_event_fractions))
+        if cfg.sampling_profile == "hard-events"
+        else train.sampling_weights()
+    )
+    sampler=WeightedRandomSampler(torch.from_numpy(sampling_weights),len(train),replacement=True,generator=torch.Generator().manual_seed(cfg.seed))
     kwargs=dict(batch_size=cfg.batch_size,num_workers=cfg.num_workers,pin_memory=torch.cuda.is_available() and not cfg.cpu,persistent_workers=cfg.num_workers>0)
     train_loader=DataLoader(train,sampler=sampler,**kwargs); val_loader=DataLoader(val,shuffle=False,**kwargs)
     device=torch.device("cpu" if cfg.cpu or not torch.cuda.is_available() else "cuda")
@@ -117,7 +178,7 @@ def main() -> None:
     optimizer=torch.optim.AdamW([{"params":heads,"lr":cfg.lr},{"params":backbone,"lr":cfg.backbone_lr}],weight_decay=cfg.weight_decay)
     scheduler=torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,T_max=cfg.epochs)
     scaler=torch.amp.GradScaler("cuda",enabled=device.type=="cuda")
-    print("contract",json.dumps({"initialization_only":str(cfg.init_checkpoint),"teacher":None,"distillation":None,"trainable_parameters":sum(p.numel() for p in model.parameters() if p.requires_grad),"train_samples":len(train),"val_samples":len(val),"train_runs":len(filtered["train"]),"val_runs":len(filtered["val"])},sort_keys=True),flush=True)
+    print("contract",json.dumps({"initialization_only":str(cfg.init_checkpoint),"teacher":None,"distillation":None,"sampling_profile":cfg.sampling_profile,"selection_profile":cfg.selection_profile,"signal_visibility_cache":str(cfg.signal_visibility_cache) if cfg.signal_visibility_cache else None,"trainable_parameters":sum(p.numel() for p in model.parameters() if p.requires_grad),"train_samples":len(train),"val_samples":len(val),"train_runs":len(filtered["train"]),"val_runs":len(filtered["val"])},sort_keys=True),flush=True)
     best=math.inf; history=[]
     for epoch in range(cfg.epochs):
         started=time.time(); model.set_original_training_phase("full"); model.train(); metrics=Metrics()
@@ -137,6 +198,14 @@ def main() -> None:
         payload={"schema":"tcp_morai_full_policy_v1","epoch":epoch,"model_state":model.state_dict(),"optimizer_state":optimizer.state_dict(),"history":history,"initialization":initialization,"teacher":None,"distillation":None,"args":{k:str(v) if isinstance(v,Path) else v for k,v in vars(cfg).items()}}
         torch.save(payload,cfg.output_dir/"latest.pt")
         score=val_result["ade_m"]+val_result["current_control_mae"]+val_result["future_control_mae"]
+        if cfg.selection_profile == "hard-events":
+            hard = val_result["hard_event_metrics"]
+            selected_groups = [name for name in ("avoid", "avoid_approach", "signal_drive") if name in hard]
+            score += 0.5 * sum(
+                hard[name][key]
+                for name in selected_groups
+                for key in ("ade_m", "current_control_mae", "future_control_mae")
+            )
         if score<best: best=score; payload["selection_score"]=score; torch.save(payload,cfg.output_dir/"best.pt")
         (cfg.output_dir/"history.json").write_text(json.dumps(history,indent=2))
 

@@ -22,6 +22,11 @@ from multimodal_planner_v9.data import (
     _sample_photometric_augmentation,
 )
 
+# DataLoader already parallelizes JPEG decode/resize across worker processes.
+# Prevent every worker from creating another OpenCV thread pool and
+# oversubscribing the 12-thread host CPU.
+cv2.setNumThreads(0)
+
 
 # Official TCP predicts four future frames saved at roughly 2 Hz.  MORAI's raw
 # labels are 5 Hz, so these are the closest *existing* samples to
@@ -60,7 +65,14 @@ def _route_target(route: np.ndarray, lookahead_m: float = 10.0) -> np.ndarray:
     return forward[min(index, len(forward) - 1)].copy()
 
 
-def _route_command(route: np.ndarray, lookahead_m: float = 20.0) -> np.ndarray:
+def _route_command(route: np.ndarray, lookahead_m: float = 30.0) -> np.ndarray:
+    """Infer only TCP's high-level command from longer route context.
+
+    The TCP target point remains the existing 10 m point and waypoint/control
+    targets are unchanged.  Looking farther here prevents a vehicle waiting on
+    the straight approach to a junction from being labelled LANEFOLLOW merely
+    because the actual turn starts beyond the old 20 m command horizon.
+    """
     target = _route_target(route, lookahead_m)
     angle = float(np.arctan2(target[1], max(target[0], 1.0e-3)))
     # Official TCP order: LEFT, RIGHT, STRAIGHT, LANEFOLLOW,
@@ -74,6 +86,99 @@ def _route_command(route: np.ndarray, lookahead_m: float = 20.0) -> np.ndarray:
     one_hot = np.zeros(6, dtype=np.float32)
     one_hot[command] = 1.0
     return one_hot
+
+
+# Keep the official six-dimensional TCP command contract so published TCP
+# checkpoints remain loadable.  MORAI does not use CARLA's lane-change
+# commands; reserve CHANGELANELEFT (index 4) as the explicit obstacle-avoidance
+# command.  The runtime meaning is therefore AVOID, not a generic lane change.
+TCP_COMMAND_AVOID = 4
+
+
+def _remove_short_left_runs(commands: np.ndarray, min_samples: int = 8) -> np.ndarray:
+    """Suppress brief curvature-triggered LEFT commands.
+
+    Converted MORAI samples are 4 Hz.  A real junction LEFT remains active for
+    several seconds, while ordinary bends only cross the 12 degree threshold
+    for a handful of samples.  Runs shorter than 2 seconds are LANEFOLLOW.
+    """
+    output = np.asarray(commands, dtype=np.int64).copy()
+    index = 0
+    while index < len(output):
+        if output[index] != 0:  # TCP command index 0 = LEFT
+            index += 1
+            continue
+        end = index + 1
+        while end < len(output) and output[end] == 0:
+            end += 1
+        if end - index < min_samples:
+            output[index:end] = 3  # TCP command index 3 = LANEFOLLOW
+        index = end
+    return output
+
+
+def _traffic_light_points(node_file: Path) -> np.ndarray:
+    nodes = json.loads(Path(node_file).read_text())
+    points = [
+        node["point"][:2]
+        for node in nodes
+        if node.get("traffic_light_id")
+        and not str(node["traffic_light_id"]).upper().startswith("LCS")
+    ]
+    return np.asarray(points, dtype=np.float64)
+
+
+def _apply_signal_straight(
+    commands: np.ndarray,
+    pose_xy: np.ndarray,
+    signal_xy: np.ndarray,
+    approach_m: float = 30.0,
+    exit_m: float = 10.0,
+    capture_radius_m: float = 5.0,
+) -> np.ndarray:
+    """Override only signalized-intersection passages with TCP STRAIGHT."""
+    output = np.asarray(commands, dtype=np.int64).copy()
+    signal_window = _signal_window_mask(
+        pose_xy,
+        signal_xy,
+        approach_m=approach_m,
+        exit_m=exit_m,
+        capture_radius_m=capture_radius_m,
+    )
+    # A signal does not imply a straight maneuver. Preserve genuine LEFT and
+    # RIGHT, and promote only otherwise-LANEFOLLOW samples.
+    output[signal_window & (output == 3)] = 2
+    return output
+
+
+def _signal_window_mask(
+    pose_xy: np.ndarray,
+    signal_xy: np.ndarray,
+    approach_m: float = 30.0,
+    exit_m: float = 10.0,
+    capture_radius_m: float = 5.0,
+) -> np.ndarray:
+    """Mark samples surrounding an actually traversed MGeo traffic signal."""
+    pose_xy = np.asarray(pose_xy, dtype=np.float64)
+    signal_xy = np.asarray(signal_xy, dtype=np.float64)
+    output = np.zeros(len(pose_xy), dtype=bool)
+    if len(output) == 0 or len(signal_xy) == 0:
+        return output
+    progress = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(pose_xy, axis=0), axis=1))]
+    nearest = np.sqrt(
+        np.min(np.sum((pose_xy[:, None, :] - signal_xy[None, :, :]) ** 2, axis=2), axis=1)
+    )
+    hits = np.flatnonzero(nearest <= capture_radius_m)
+    if len(hits) == 0:
+        return output
+    # Collapse consecutive samples around one physical signal passage.
+    groups = np.split(hits, np.flatnonzero(np.diff(hits) > 4) + 1)
+    for group in groups:
+        event = int(group[np.argmin(nearest[group])])
+        begin = int(np.searchsorted(progress, progress[event] - approach_m, side="left"))
+        end = int(np.searchsorted(progress, progress[event] + exit_m, side="right"))
+        output[begin:end] = True
+    return output
 
 
 class TCPMoraiDataset(Dataset):
@@ -116,6 +221,45 @@ class TCPMoraiDataset(Dataset):
             for run_index, run in enumerate(self.runs)
             for sample_index in range(len(run))
         ]
+        self.command_labels: list[np.ndarray] = []
+        self.signal_window_labels: list[np.ndarray] = []
+        node_file = Path(__file__).resolve().parents[1] / "external_models/acca2026_mgeo/node_set.json"
+        signal_xy = _traffic_light_points(node_file) if node_file.exists() else np.empty((0, 2))
+        for run in self.runs:
+            run_commands = []
+            run_pose_xy = []
+            has_pose = True
+            for frame_index in run.current_frame_idx:
+                frame_index = int(frame_index)
+                chunk_index = run._chunk_index(frame_index)
+                chunk_info = run.chunks[chunk_index]
+                chunk = run._load_chunk(chunk_index)
+                route = np.asarray(
+                    chunk["route"][frame_index - chunk_info.start], dtype=np.float32
+                )
+                command_pose_key = (
+                    "localization_pose" if "localization_pose" in chunk else "pose"
+                )
+                if command_pose_key in chunk:
+                    run_pose_xy.append(
+                        np.asarray(
+                            chunk[command_pose_key][frame_index - chunk_info.start, :2],
+                            dtype=np.float64,
+                        )
+                    )
+                else:
+                    has_pose = False
+                run_commands.append(int(np.argmax(_route_command(route))))
+            filtered = _remove_short_left_runs(np.asarray(run_commands, dtype=np.int64))
+            signal_window = (
+                _signal_window_mask(np.asarray(run_pose_xy), signal_xy)
+                if has_pose else np.zeros(len(filtered), dtype=bool)
+            )
+            self.signal_window_labels.append(signal_window)
+            self.command_labels.append(
+                _apply_signal_straight(filtered, np.asarray(run_pose_xy), signal_xy)
+                if has_pose else filtered
+            )
         labels = []
         for run_index, sample_index in self.lookup:
             action = self.runs[run_index].action_state
@@ -123,6 +267,28 @@ class TCPMoraiDataset(Dataset):
                 raise KeyError(f"{self.runs[run_index].run_dir}: action_state is required")
             labels.append(int(action[sample_index]))
         self.action_labels = np.asarray(labels, dtype=np.int64)
+        self.signal_window = np.concatenate(self.signal_window_labels).astype(bool)
+        self.signal_visible = self.signal_window.copy()
+        # Samples immediately preceding an AVOID interval still retain their
+        # original DRIVE label and human trajectory/control targets.  Mark
+        # them separately so training can learn anticipatory steering instead
+        # of seeing mostly already-active avoidance frames.
+        avoid_starts: dict[str, list[int]] = {}
+        for run_index, run in enumerate(self.runs):
+            if not run.run_id.endswith("__AVOID") or not len(run.current_frame_idx):
+                continue
+            frames = np.sort(np.asarray(run.current_frame_idx, dtype=np.int64))
+            starts = frames[np.r_[True, np.diff(frames) > 1]]
+            avoid_starts.setdefault(self.source_run_ids[run_index], []).extend(starts.tolist())
+        self.avoid_approach = np.zeros(len(self.lookup), dtype=bool)
+        for item, (run_index, sample_index) in enumerate(self.lookup):
+            if self.action_labels[item] != ACTION_DRIVE:
+                continue
+            frame = int(self.runs[run_index].current_frame_idx[sample_index])
+            self.avoid_approach[item] = any(
+                start - 12 <= frame < start
+                for start in avoid_starts.get(self.source_run_ids[run_index], ())
+            )
         if not np.isin(self.action_labels, np.arange(ACTION_COUNT)).all():
             raise ValueError("action_state contains an invalid class")
 
@@ -143,6 +309,42 @@ class TCPMoraiDataset(Dataset):
         weights = target[self.action_labels] / counts[self.action_labels]
         return (weights / weights.mean()).astype(np.float64)
 
+    def hard_event_sampling_weights(
+        self,
+        fractions: tuple[float, ...] = (0.25, 0.25, 0.20, 0.15, 0.15),
+    ) -> np.ndarray:
+        """Balance AVOID approach/active, signal DRIVE/STOP, and replay."""
+        target = np.asarray(fractions, dtype=np.float64)
+        if target.shape not in {(4,), (5,)} or np.any(target < 0.0) or not np.any(target > 0.0):
+            raise ValueError("fractions must contain four legacy or five approach-aware values")
+        target /= target.sum()
+        if len(target) == 4:
+            category = np.full(len(self), 3, dtype=np.int64)
+            category[self.signal_visible & (self.action_labels == ACTION_STOP)] = 2
+            category[self.signal_visible & (self.action_labels == ACTION_DRIVE)] = 1
+            category[self.action_labels == ACTION_AVOID] = 0
+        else:
+            category = np.full(len(self), 4, dtype=np.int64)
+            category[self.signal_visible & (self.action_labels == ACTION_STOP)] = 3
+            category[self.signal_visible & (self.action_labels == ACTION_DRIVE)] = 2
+            category[self.action_labels == ACTION_AVOID] = 1
+            category[self.avoid_approach] = 0
+        counts = np.bincount(category, minlength=len(target))
+        if np.any((counts == 0) & (target > 0.0)):
+            raise ValueError(f"requested hard-event category is empty, got {counts.tolist()}")
+        weights = target[category] / counts[category]
+        return (weights / weights.mean()).astype(np.float64)
+
+    def set_signal_visibility(self, visible: np.ndarray) -> None:
+        value = np.asarray(visible, dtype=bool)
+        if value.shape != (len(self),):
+            raise ValueError(
+                f"signal visibility must have shape {(len(self),)}, got {value.shape}"
+            )
+        # A visual detection is never allowed to expand beyond the MGeo signal
+        # passage window used to mine candidates.
+        self.signal_visible = value & self.signal_window
+
     def __getitem__(self, item: int) -> dict[str, Any]:
         run_index, sample_index = self.lookup[item]
         run = self.runs[run_index]
@@ -159,18 +361,29 @@ class TCPMoraiDataset(Dataset):
                 _sample_photometric_augmentation(self.augmentation_profile),
                 variant=0,
             )
-        # The original TCP direct-control attention is fixed to an 8x29
-        # ResNet feature map, corresponding to a 256x900 front image. Existing
-        # trajectory/state jobs retain their historical 256x256 crop.
+        # Keep MORAI's native 640x360 aspect ratio for full-policy training.
+        # The original TCP implementation resized this image to 900x256 to
+        # obtain an 8x29 feature map, which visibly stretched lanes, traffic
+        # lights, and obstacles.  TCPMorai now adapts its learned attention
+        # map to the native ResNet feature-map size instead.
         image = (
-            cv2.resize(image, (900, 256), interpolation=cv2.INTER_AREA)
+            image
             if self.control_cache is not None
             else _center_crop_resize(image)
         )
         route = np.asarray(chunk["route"][local_index], dtype=np.float32)
         target_point_morai = _route_target(route)
         target_point = _morai_xy_to_tcp(target_point_morai)
-        command = _route_command(route)
+        action = int(self.action_labels[item])
+        command_index = int(self.command_labels[run_index][sample_index])
+        # Preserve the previously reviewed TCP command map verbatim and
+        # override only the per-bag, manually labelled AVOID interval.
+        # AVOID approach samples remain useful to the sampler, but retain their
+        # original command unless the reviewed bag label itself says AVOID.
+        if action == ACTION_AVOID:
+            command_index = TCP_COMMAND_AVOID
+        command = np.zeros(6, dtype=np.float32)
+        command[command_index] = 1.0
         speed_mps = abs(float(chunk["vehicle"][local_index, 0]))
         state = np.concatenate(
             (
@@ -181,7 +394,6 @@ class TCPMoraiDataset(Dataset):
         )
         target = np.asarray(run.target[sample_index], dtype=np.float32)
         waypoints = _morai_xy_to_tcp(target[WAYPOINT_INDICES, :2])
-        action = int(self.action_labels[item])
         result = {
             "image": _image_tensor(image),
             "state": torch.from_numpy(state),
@@ -190,6 +402,10 @@ class TCPMoraiDataset(Dataset):
             "speed_normalized": torch.tensor(speed_mps / 12.0, dtype=torch.float32),
             "action_state": torch.tensor(action, dtype=torch.long),
             "gps_blackout": torch.tensor(bool(run.gps_blackout[sample_index])),
+            "signal_window": torch.tensor(bool(self.signal_window[item])),
+            "signal_visible": torch.tensor(bool(self.signal_visible[item])),
+            "avoid_approach": torch.tensor(bool(self.avoid_approach[item])),
+            "command_index": torch.tensor(command_index, dtype=torch.long),
             "run_id": run.run_id,
             "sample_id": int(run.sample_id[sample_index]),
         }
@@ -214,13 +430,16 @@ class TCPMoraiDataset(Dataset):
             "samples": len(self),
             "action_counts": dict(zip(ACTION_NAMES, counts.tolist())),
             "input": {
-                "front": [3, 256, 900] if self.control_cache is not None else [3, 256, 256],
+                "front": [3, 360, 640] if self.control_cache is not None else [3, 256, 256],
                 "speed": "vehicle[0] m/s normalized by 12",
                 "target_point": (
                     "10m Local Route lookahead converted from MORAI "
                     "[forward,left] to TCP [right,negative-forward]"
                 ),
-                "command": "6-way TCP one-hot derived from 20m route curvature",
+                "command": (
+                    "6-way TCP one-hot derived from up to 30m route context; "
+                    "command context only, target point remains 10m"
+                ),
             },
             "target": {
                 "waypoints": [4, 2],
@@ -250,5 +469,9 @@ __all__ = [
     "WAYPOINT_INDICES",
     "_morai_xy_to_tcp",
     "_route_command",
+    "_remove_short_left_runs",
+    "_apply_signal_straight",
+    "_signal_window_mask",
+    "_traffic_light_points",
     "_route_target",
 ]

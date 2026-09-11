@@ -6,6 +6,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torchvision.models import resnet34
 
 
@@ -15,13 +16,12 @@ class TCPConfig:
 
 
 class TCPMorai(nn.Module):
-    """Official TCP topology with MORAI trajectory and direct-control paths.
+    """Official TCP topology with a trajectory-only MORAI training path.
 
     Module names and tensor shapes intentionally match OpenDriveLab/TCP so a
     published reproduction Lightning checkpoint can be transferred directly.
-    Value branches remain only for checkpoint compatibility. Full-policy
-    training optimizes the encoder, trajectory branch, and direct-control
-    branch from MORAI human labels without teacher distillation.
+    The control/value branches remain in the state dict for provenance, but
+    MORAI fine-tuning only optimizes modules supported by available labels.
     """
 
     def __init__(self, config: TCPConfig | None = None) -> None:
@@ -138,6 +138,26 @@ class TCPMorai(nn.Module):
         embedding = network.fc(embedding)
         return embedding, spatial
 
+    @staticmethod
+    def _attention_for_spatial(
+        attention: torch.Tensor,
+        spatial: torch.Tensor,
+    ) -> torch.Tensor:
+        """Map the official 8x29 TCP attention grid to the native image grid."""
+        attention = attention.view(-1, 1, 8, 29)
+        target_size = spatial.shape[-2:]
+        if attention.shape[-2:] != target_size:
+            attention = F.interpolate(
+                attention,
+                size=target_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+            # Bilinear interpolation changes the discrete sum.  TCP attention
+            # is a probability distribution, so restore that contract.
+            attention = attention / attention.sum(dim=(2, 3), keepdim=True).clamp_min(1e-8)
+        return attention
+
     def forward_trajectory(
         self,
         image: torch.Tensor,
@@ -191,7 +211,9 @@ class TCPMorai(nn.Module):
             waypoints.append(waypoint)
         trajectory_hidden_tensor = torch.stack(trajectory_hidden, dim=1)
 
-        initial_attention = self.init_att(measurement_feature).view(-1, 1, 8, 29)
+        initial_attention = self._attention_for_spatial(
+            self.init_att(measurement_feature), spatial
+        )
         attended = torch.sum(spatial * initial_attention, dim=(2, 3))
         control_feature = self.join_ctrl(
             torch.cat((attended, measurement_feature), dim=1)
@@ -209,9 +231,9 @@ class TCPMorai(nn.Module):
             control_hidden = self.decoder_ctrl(
                 torch.cat((recurrent_feature, alpha, beta), dim=1), control_hidden
             )
-            attention = self.wp_att(
+            attention = self._attention_for_spatial(self.wp_att(
                 torch.cat((control_hidden, trajectory_hidden_tensor[:, index]), dim=1)
-            ).view(-1, 1, 8, 29)
+            ), spatial)
             attended = torch.sum(spatial * attention, dim=(2, 3))
             merged = self.merge(torch.cat((control_hidden, attended), dim=1))
             recurrent_feature = recurrent_feature + self.output_ctrl(merged)
