@@ -367,7 +367,7 @@ class TCPMoraiDataset(Dataset):
         # lights, and obstacles.  TCPMorai now adapts its learned attention
         # map to the native ResNet feature-map size instead.
         image = (
-            image
+            cv2.resize(image, (640, 360), interpolation=cv2.INTER_AREA)
             if self.control_cache is not None
             else _center_crop_resize(image)
         )

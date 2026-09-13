@@ -218,6 +218,40 @@ shape 변경으로 비교해야 한다.
 closed-loop 주행과 구분하며, 영상의 검은 제목 바는 카메라 아래로 배치해 상단
 신호등을 가리지 않도록 수정했다.
 
+#### Command-map + bag별 AVOID 최종 학습
+
+최종 TCP 학습에서는 bag 내부 navigation command를 사용하지 않았다. 기존에
+검수한 30 m command map(짧은 LEFT 제거 및 신호 교차로 STRAIGHT 보정)을
+그대로 유지하고, 각 bag에서 수동 검수된 `action_state == AVOID` 구간만 TCP
+command index 4로 덮어썼다. AVOID 진입 전 접근 구간은 별도 sampling 범주로
+강조했지만 command 자체는 원래 지도 command를 유지한다.
+
+학습에 실제 사용된 데이터는 원본 301 bags(사람 188, PDM-Lite teacher 113),
+변환 후 581 runs다. effective split은 train 487 runs/127,872 samples,
+validation 47 runs/14,140 samples, test 47 runs이며 원본 bag 단위로 분리했다.
+학습 batch는 AVOID 접근 20%, AVOID active 25%, 신호 DRIVE 20%, 신호 STOP
+15%, 일반 replay 20%가 되도록 weighted sampling했다.
+
+10 epochs 학습 후 마지막 checkpoint에서 20 epochs를 추가해 누적 30 epochs를
+학습했다. 종합 hard-event selection score 기준 최종 epoch가 best였다.
+
+| Validation 지표 | 초기 10-epoch best | 누적 30-epoch best |
+| --- | ---: | ---: |
+| 전체 ADE | 0.487 m | **0.460 m** |
+| FDE@2s | 0.837 m | **0.791 m** |
+| Current/Future control MAE | 0.069 / 0.093 | **0.061 / 0.087** |
+| 일반 replay ADE | 0.499 m | **0.466 m** |
+| 신호 DRIVE ADE | 0.555 m | **0.537 m** |
+| 신호 STOP ADE | **0.161 m** | 0.176 m |
+| AVOID ADE | 0.592 m | **0.581 m** |
+| AVOID 접근 ADE | **0.642 m** | 0.660 m |
+
+일반 경로와 직접 제어는 개선됐지만 AVOID train/validation ADE가 최종
+0.089/0.581 m로 크게 벌어졌다. 따라서 추가 epoch보다 서로 다른 장애물 위치,
+종류, 접근 속도, 좌·우 회피 및 장애물 없는 대응 장면을 포함한 독립 AVOID bag
+확장이 우선이다. 재현 가능한 최종 수치는
+[`results/tcp_command_map_plus_bag_avoid_v1/final_summary.json`](results/tcp_command_map_plus_bag_avoid_v1/final_summary.json)에 보관한다.
+
 ### 4.4 SimLingo-Base MORAI adaptation
 
 공식 full SimLingo VLA를 LoRA로 조정한 실험과 구분해, SimLingo-Base의

@@ -1,0 +1,42 @@
+{
+  "dataset": {
+    "source_bags": 301,
+    "human_bags": 188,
+    "teacher_bags": 113,
+    "processed_runs": 581,
+    "train_runs": 487,
+    "validation_runs": 47,
+    "test_runs": 47,
+    "train_samples": 127872,
+    "validation_samples": 14140
+  },
+  "training": {
+    "initial_epochs": 10,
+    "continuation_epochs": 20,
+    "cumulative_epochs": 30,
+    "batch_size": 80,
+    "hard_event_fractions": {
+      "avoid_approach": 0.20,
+      "avoid_active": 0.25,
+      "signal_drive": 0.20,
+      "signal_stop": 0.15,
+      "general_replay": 0.20
+    }
+  },
+  "best_checkpoint": {
+    "cumulative_epoch": 30,
+    "selection_score": 1.94642328265,
+    "validation": {
+      "ade_m": 0.4603299118094217,
+      "fde_2s_m": 0.7912350736968148,
+      "current_control_mae": 0.06069801286418818,
+      "future_control_mae": 0.08745549350734563,
+      "avoid_ade_m": 0.5812312943936255,
+      "avoid_approach_ade_m": 0.6597321851454168,
+      "general_replay_ade_m": 0.466032600897461,
+      "signal_drive_ade_m": 0.536831615233082,
+      "signal_stop_ade_m": 0.17613305205901222
+    }
+  },
+  "interpretation": "General trajectory and control metrics improved through epoch 30, but AVOID remained near 0.58 m and showed a large train-validation gap. More epochs are not the primary remedy; additional independent AVOID scenes are required."
+}
