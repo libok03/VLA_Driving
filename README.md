@@ -252,6 +252,59 @@ validation 47 runs/14,140 samples, test 47 runs이며 원본 bag 단위로 분�
 확장이 우선이다. 재현 가능한 최종 수치는
 [`results/tcp_command_map_plus_bag_avoid_v1/final_summary.json`](results/tcp_command_map_plus_bag_avoid_v1/final_summary.json)에 보관한다.
 
+#### 2026-09-15 teacher bag 확장 학습 (진행 중)
+
+기존 AVOID 일반화 부족을 보완하기 위해 2026-09-14~15에 수집한 192 bags를
+추가했다. 너무 짧아 4초 미래 label을 만들 수 없는 1 bag은 원본을 삭제하지 않고
+별도 제외 폴더로 이동했다. 변환된 teacher dataset은 기존 113 runs와 신규 192
+runs를 합쳐 305 runs, 284,158 samples이다.
+
+| Teacher 데이터 항목 | 값 |
+| --- | ---: |
+| 전체 run / sample | 305 / 284,158 |
+| DRIVE | 233,766 (82.3%) |
+| STOP | 40,178 (14.1%) |
+| AVOID | 10,214 (3.6%) |
+| GPS blackout | 23,432 |
+| 수동 검수 저속 구간 제외 | 16 intervals / 971 samples |
+
+Command는 bag에 기록된 navigation command를 다시 사용하지 않는다. 기존에 직접
+검수한 **30 m command map**을 유지하고, 짧은 LEFT 제거와 신호 교차로 STRAIGHT
+보정을 적용한 뒤 각 bag의 `action_state == AVOID` 구간만 MORAI 전용 command
+index 4로 덮어쓴다. 위치 조회에는 privileged teacher pose가 아니라
+`/localization/kinematic_state`를 사용한다.
+
+저속 제외는 `DRIVE` 또는 `AVOID` 상태에서 3 km/h 미만이 5초 이상 지속된
+비정상 구간만 대상으로 한다. 해당 구간과 현재 시점부터 4초 미래 supervision
+window가 겹치는 sample을 제외하며 raw bag과 pose 값은 수정하지 않는다. 정상적인
+신호 STOP은 보존한다. bag 끝의 5초 이상 연속 STOP은 전체 305 runs 중 1 run,
+25 samples(6.25초)뿐이어서 이번 실험에서는 유지했다.
+
+사람 검수 데이터까지 결합한 effective split은 train 719 runs/258,922 samples,
+validation 76 runs/31,539 samples, test 78 runs이다. split은 source run 단위로
+유지한다. 학습은 `tcp_teacher_full_policy_v6_command_fixed_b32_cont29/best.pt`를
+초기화로 사용하고 encoder와 두 control/trajectory branch를 모두 풀어 10 epochs
+fine-tuning한다. batch size는 80이며 AVOID 접근 20%, AVOID active 25%, 신호
+DRIVE 20%, 신호 STOP 15%, 일반 replay 20%의 hard-event sampling을 사용한다.
+
+Epoch 1의 600/3,237 step까지 집계된 값은 아래와 같다. 이는 validation 결과가
+아닌 누적 train 평균이므로 최종 성능 판단에는 사용하지 않는다.
+
+| Train 지표 | Step 100 | Step 600 |
+| --- | ---: | ---: |
+| 전체 ADE | 0.828 m | 0.643 m |
+| FDE@2s | 1.460 m | 1.122 m |
+| AVOID ADE | 0.944 m | 0.747 m |
+| AVOID 접근 ADE | 0.901 m | 0.653 m |
+| 신호 DRIVE ADE | 0.948 m | 0.680 m |
+| 신호 STOP ADE | 0.307 m | 0.236 m |
+| current/future control MAE | 0.162 / 0.211 | 0.131 / 0.185 |
+
+초기 train 지표는 연속적으로 하락하고 있으며 non-finite 오류는 관측되지 않았다.
+그러나 데이터 수 증가만으로 일반화가 보장되지는 않는다. 최종 checkpoint는
+AVOID·AVOID 접근·신호 DRIVE·일반 replay의 validation 분리 지표와 새로운 bag의
+closed-loop 회피 성공 여부를 함께 비교해 선택한다.
+
 ### 4.4 SimLingo-Base MORAI adaptation
 
 공식 full SimLingo VLA를 LoRA로 조정한 실험과 구분해, SimLingo-Base의
