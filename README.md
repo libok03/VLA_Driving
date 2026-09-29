@@ -1,595 +1,399 @@
-# VLA Driving
+# ACCA MORAI Autonomous Driving
 
-이 저장소는 3대 카메라와 VLP16 BEV, 단일 목표점으로 30 m 공간 경로와
-상태를 예측하고 MPC에 전달하는 MORAI V17 멀티모달 플래너를 기록한다.
+MORAI K-City 환경을 위한 학습 기반 자율주행 시스템입니다. 전방 카메라 영상과 차량 상태,
+MGeo에서 생성한 경로 조건을 입력받아 TCP(Trajectory-guided Control Prediction)가 미래 궤적과
+차량 제어를 함께 예측합니다. GPS·IMU·Wheel 기반 위치 추정과 독립적인 Safety Monitor를 결합해
+학습 정책의 출력이 실제 폐루프 주행으로 이어지도록 구성했습니다.
 
-raw bag, 변환 NPZ, 학습 출력, checkpoint는 용량 및 데이터 관리 문제로 Git에 포함하지 않습니다. 재현용 소스와 변환·학습 정책은 포함합니다.
+이 README는 **2026 대학생 AI·S/W 모빌리티 경진대회 ACCA 기술보고서**를 기준으로 프로젝트의
+최종 설계와 평가 결과를 정리합니다. 저장소에는 학습·평가 및 데이터 변환 코드와 일부 결과가
+포함되어 있으며, 대용량 ROS bag, 변환 데이터셋, pretrained checkpoint는 포함하지 않습니다.
 
-## 1. 프로젝트 개요
+## 핵심 결과
 
-MORAI 환경에서 주어진 목표 방향으로 경로를 만들고, 정지·회피 상황을 분류한 뒤 MPC가 추종할 참조 경로와 속도 후보를 제공하는 것이 목표다. 모델은 제어 명령을 직접 확정하지 않으며, 상태 선택·경로 보간·안전 제한은 runtime 계층에서 수행한다.
+| 구분 | 결과 |
+| --- | ---: |
+| Held-out test | **ADE 0.2924 m**, **FDE@2 s 0.5225 m** |
+| Current / future control MAE | 0.0392 / 0.0698 |
+| TCP direct 폐루프 완주율 | **100.0%** |
+| TCP direct 경로 오차 | Mean 0.38 m / RMSE 0.55 m |
+| Neural inference latency | 평균 11.02 ms / p95 18.05 ms |
+| GPS+IMU+Wheel EKF 오차 | 일반 주행 구간 약 0.08-0.20 m |
 
-### 문서 구성
+> 위 결과는 MORAI의 제한된 K-City 시나리오에서 측정한 값입니다. 실제 도로 안전성이나 처음
+> 보는 환경에서의 일반화를 보증하지 않습니다.
 
-1. 프로젝트 개요
-2. 최종 시스템 설계
-3. 데이터셋과 변환
-4. 학습 및 정량 평가
-5. 정성 평가와 closed-loop 주행
-6. Runtime·MPC·안전 설계
-7. 재현 방법
-8. V1→V17 개발 과정
-9. Fallback과 안전 경계
-
-## 2. 최종 시스템 설계: MORAI V17
-
-`src/multimodal_planner_v17_spatial30/`는 MORAI용 최종 실험 계보입니다. 입력은 최근 1초의 센서 history와 **30 m goal point**뿐입니다.
+## 시스템 구성
 
 ```text
-Front camera  [B, 5, 3, 360, 640] ─┐
-Left camera   [B, 5, 3, 240, 320] ─┼─ Shared pretrained ResNet18 + camera-ID
-Right camera  [B, 5, 3, 240, 320] ─┘
-VLP16 BEV     [B, 5, 3, 256, 256] ─── Light BEV CNN
-                                         ↓
-                            8 sensor-conditioned spatial tokens
-                                         ↓
-                           shared temporal GRU (history=5)
-                                         ↓
-                     Goal-point cross-attention / fused context
-                                         ↓
-          ┌──────── DRIVE path: 6 × (x,y) at fixed stations ────────┐
-          ├──────── AVOID path: 6 × (x,y) at fixed stations ────────┤
-          ├──────── absolute speed: 6 stations (Beta mean) ─────────┤
-          └──────── action logits: DRIVE / STOP / AVOID ────────────┘
+MORAI Simulator
+  ├─ Front RGB 640x360 ───────────────────────────────┐
+  ├─ Vehicle speed ───────────────────────────────────┤
+  ├─ GPS + IMU + Wheel ── Local/Global EKF ──┐       │
+  └─ Rear 3D LiDAR ──────────────────────────┼───────┼──────────┐
+                                              │       │          │
+                                              ▼       ▼          ▼
+                                      MGeo route   TCP policy   Safety Monitor
+                                          │            │          │
+                              10 m target point        ├─ 4 future waypoints
+                              30 m route command       ├─ current control
+                                          │            └─ 4 future controls
+                                          └────────────┬──────────┘
+                                                       ▼
+                                              Vehicle actuation
+                                                       ▲
+                                                       └─ E-STOP has priority
 ```
 
-![V17 실제 모델 입력과 전처리](assets/morai_v17/figures/model_inputs.png)
+전체 시스템은 다음 세 계층으로 나뉩니다.
 
-공간 station은 **3, 6, 10, 15, 22, 30 m**이다. 경로는 시간 후 차량 위치가 아니라, ego 기준 route-progress 상의 기하 형상이다. 따라서 planner가 경로 형상을 만들고, 외부 state machine이 상태별 후보를 선택한 뒤 smoothing·0.1 m resampling을 수행해 MPC에 전달한다. STOP은 경로 회귀 대상이 아니라 분류 결과를 통해 목표 속도 0으로 강제한다.
+- **Localization**: GPS, IMU, wheel/vehicle state를 2차원 EKF로 융합해 ego odometry를 추정합니다.
+- **Driving Model**: TCP가 전방 영상과 경로 조건으로 미래 궤적, 조향, 종방향 제어를 공동 예측합니다.
+- **Safety Monitor**: 후방 LiDAR 충돌 위험과 센서 신호 두절을 감시하고 필요 시 E-STOP을 우선 적용합니다.
 
-### 모델 계약
+### 센서와 ROS 인터페이스
 
-| 항목 | V17 계약 |
+| 입력 | 역할 |
 | --- | --- |
-| 입력 | Front/Left/Right 5-frame history, 3-channel VLP16 BEV history, ego-relative 30 m goal point |
-| 경로 출력 | DRIVE 6×2, AVOID 6×2; 모두 3/6/10/15/22/30 m 고정 공간 station |
-| 종방향 출력 | 같은 station에서의 absolute speed 6개 |
-| 상태 출력 | DRIVE / STOP / AVOID probability |
-| 모델에서 제외 | current speed, ego/IMU/GPS, MGeo, local route |
-| route의 역할 | offline label 및 30 m goal 생성용. 모델 입력은 아님 |
+| Front RGB camera | 차선, 신호등, 장애물 등 전방 scene context |
+| GPS | 장기 절대 위치 보정 |
+| IMU | yaw rate 기반 자세·운동 추정 |
+| Vehicle state / wheel | 속도와 dead reckoning 입력 |
+| Rear 3D LiDAR | 후측방 차량 검출과 TTC 계산 |
 
-## 3. 데이터셋과 변환
+MORAI의 UDP packet은 timestamp와 frame ID를 포함한 ROS message로 변환해 각 모듈에 전달합니다.
+Localization은 주행 모델에 경로 조건을 제공하고, Safety Monitor는 주행 모델과 독립적으로 차량
+제어를 중단할 수 있습니다.
 
-- **MORAI**: 실제 deployment target. DRIVE/STOP/AVOID를 bag 구간 단위로 수동 검수해 label manifest를 만든다.
-- **Bench2Drive**: 멀티센서 표현 학습을 위한 사전학습 데이터. MORAI VLP16의 전방 장착 특성과 가까워지도록 camera·LiDAR representation을 변환한다.
-- **GPS blackout**: 터널 구간은 삭제하지 않는다. GPS health를 학습 shortcut으로 사용하지 않으며, blackout/non-blackout을 분리해 진단한다.
-- **증강**: geometry는 바꾸지 않고 color jitter, 밝기·대비, fog를 적용한다. 신호등 색 의미를 뒤집는 hue 증강은 제한한다.
+## 위치 추정과 경로 조건화
 
-![Bench2Drive → MORAI 표현 변환](assets/morai_v17/figures/bench2drive_conversion.png)
+### Local / Global EKF
 
-### 3.1 TCP·SimLingo teacher bag 확장
+K-City를 고저차가 작은 평면 환경으로 보고 상태를 `(x, y, yaw)`로 정의합니다.
 
-사람 주행과 teacher 주행을 이용한 최신 데이터는 ROS timestamp 기준으로
-camera, pose, vehicle status와 control을 정렬하고 4 Hz sample로 변환한다.
-인접 frame 누출을 막기 위해 split은 sample이 아니라 **source bag 단위**로
-고정한다. GPS blackout은 터널의 실제 localization 조건이므로 삭제하거나
-연속 궤적으로 인위적으로 보정하지 않는다.
+- **Local EKF**는 IMU yaw rate와 차량 속도로 연속적인 odometry를 생성합니다.
+- **Global EKF**는 GPS 관측을 추가해 장기 drift를 보정합니다.
+- GPS blackout 동안에는 IMU와 wheel 기반 dead reckoning을 사용합니다.
+- GPS 복구 또는 respawn으로 큰 위치 도약이 감지되면 수신한 절대 위치로 재초기화합니다.
 
-기존 47-bag 데이터의 확정 분포는 다음과 같다.
+### MGeo 경로 표현
 
-| 항목 | 값 |
-| --- | ---: |
-| 원본 주행 | 47 bags, 약 3.72시간 |
-| 전체 sample | 52,034 |
-| DRIVE | 44,630 (85.8%) |
-| STOP | 6,350 (12.2%) |
-| AVOID | 1,054 (2.0%) |
-| GPS blackout | 2,198 |
+전역 경로 전체를 모델에 넣지 않고 현재 pose 이후의 경로를 ego 좌표계로 바꾼 뒤 두 가지 조건으로
+축약합니다.
 
-2026-09-07에는 원본이 **88 bags, 37.56 GiB**로 확장됐다. 새로 추가된
-41 bags는 기존 47 bags와 중복을 검사한 뒤 증분 변환한다. 원본 bag을 내부
-디스크에 다시 복제하지 않고, TCP용 `900×256` cache와 SimLingo-Base용
-`672×336` cache를 각각 생성한다. 신규 데이터의 최종 상태 분포는 변환 완료
-후 manifest에서 다시 산출한다.
-
-## 4. 학습 및 정량 평가
-
-2026-08-20 기준 MORAI validation 결과(고정 3/6/10/15/22/30 m 축)는 아래와 같다. 이는 open-loop 검증이며, 최종 판단은 bag replay와 MPC 폐루프 시험으로 한다.
-
-| 항목 | 결과 |
-| --- | ---: |
-| 전체 path coordinate MAE | 0.333 m |
-| DRIVE ADE / lateral MAE | 0.590 m / 0.568 m |
-| AVOID ADE / lateral MAE | 0.535 m / 0.495 m |
-| speed MAE | 1.715 m/s (약 6.2 km/h) |
-| action accuracy / macro-F1 | 98.23% / 94.77% |
-| AVOID precision / recall | 78.63% / 98.92% |
-
-AVOID recall은 높지만 DRIVE를 AVOID로 판정하는 보수적 오탐이 아직 존재한다. 따라서 실제 runtime에서는 raw argmax를 즉시 적용하지 않고 state queue, confidence threshold, TTC 기반 safety monitor를 함께 사용해야 한다. 이 수치는 차선 이탈·충돌이 없다는 보증이 아니다.
-
-### 4.1 V17 정량 결과 해석
-
-이 수치는 2026-08-18 fine-tuning best checkpoint의 open-loop validation
-결과다. 제한된 검증 split에서 경로·속도·상태를 측정한 값이므로, 실제 제어
-안정성은 5장의 closed-loop 결과와 함께 판단한다.
-
-### 4.2 TCP state-only 비교 모델
-
-TCP trajectory 성능을 유지하면서 상황 판단만 개선하기 위해, TCP MORAI V2의
-trajectory 기준 최적 checkpoint를 고정하고 카메라 feature에 연결된
-`DRIVE / STOP / AVOID` classification head만 추가 학습했다. TCP encoder,
-measurement branch, trajectory decoder와 BatchNorm running statistics는 모두
-고정했다. 따라서 V3의 trajectory 수치는 초기 TCP checkpoint와 같고, 변경된
-부분은 state classifier뿐이다.
-
-#### Validation 결과
-
-| 항목 | 결과 |
-| --- | ---: |
-| State accuracy | 97.72% |
-| State macro-F1 | 95.95% |
-| 전체 ADE / FDE@2s | 0.674 m / 1.152 m |
-| DRIVE ADE | 0.943 m |
-| STOP ADE | 0.122 m |
-| AVOID ADE | 0.854 m |
-
-검증 confusion matrix는 actual row, predicted column이며 class 순서는
-`DRIVE / STOP / AVOID`이다.
-
-```text
-3480   32   10
-  76 1668    0
-   4    0   89
-```
-
-#### Temporal stability 진단
-
-검증 5,359 sample을 확인했을 때, 단일 출력의 네 waypoint가
-좌→우→좌로 꺾이는 내부 지그재그는 0건이었다. 반면 가까운 연속 sample
-5,144쌍 중 GT lateral 변화가 0.5 m 미만인데 예측만 1 m 이상 바뀐 경우가
-35쌍(0.68%) 있었고, GT보다 예측 변화가 1 m 이상 과도한 경우는
-23쌍(0.45%)이었다. 즉 문제는 한 경로 내부 형상보다 single-frame TCP 출력의
-프레임 간 불연속에 가깝다.
-
-### 4.3 TCP full-policy MORAI 재학습
-
-TCP state-only 실험은 pretrained trajectory를 보존한 채 classifier만 학습했기
-때문에 MORAI 사람 주행의 직접 제어를 배우지 않았다. 다음 단계에서는 공개 TCP
-재현 checkpoint에 들어 있는 Roach-distilled driving prior를 **초기화로만** 사용하고,
-frozen teacher, feature/value distillation, teacher action KL을 모두 제거했다. ResNet34
-encoder부터 trajectory-guided direct-control branch까지 풀어 MORAI 사람 주행 label로
-policy 전체를 다시 학습했다.
-
-```text
-TCP checkpoint (initialization only)
-                 │
-Front RGB 3×256×900 + speed + target point + command
-                 │
-      fully trainable ResNet34 encoder
-                 ├─ trajectory branch → 4 waypoints (0.6/1.0/1.6/2.0 s)
-                 ├─ current Beta control → signed acceleration, steering
-                 ├─ trajectory-guided recurrent control → 4 future controls
-                 └─ auxiliary current-speed prediction
-```
-
-별도 `/Ctrl_cmd`가 없는 bag은 `/morai/ego_vehicle_status`의 실제 적용
-`accel`, `brake`, `steer`를 ROS timestamp로 camera frame에 정렬했다. signed acceleration은
-우세한 brake를 음수로, throttle을 양수로 표현하며 steering은 MORAI의 ±40°를
-`[-1,1]`로 정규화했다. 원본 bag이 남아 있는 188/229개 source를 사용할 수 있었고,
-effective split은 train 28,223 / validation 2,613 sample이다. source run 기준
-train/validation/test 중복은 없다.
-
-#### 최종 validation 결과
-
-| 항목 | Epoch 2 | Epoch 10 best |
-| --- | ---: | ---: |
-| 전체 ADE / FDE@2s | 0.437 / 0.750 m | **0.391 / 0.664 m** |
-| state macro ADE | 0.577 m | **0.521 m** |
-| DRIVE ADE / FDE@2s | 0.848 / 1.454 m | **0.769 / 1.302 m** |
-| STOP ADE / FDE@2s | 0.059 / 0.105 m | **0.044 / 0.079 m** |
-| AVOID ADE / FDE@2s | 0.823 / 1.380 m | **0.751 / 1.240 m** |
-| DRIVE current steer MAE | 0.285 | **0.247** |
-| AVOID current steer MAE | 0.364 | **0.321** |
-
-전체 ADE만 보면 STOP이 validation의 52%를 차지해 성능이 과도하게 좋아 보인다.
-따라서 checkpoint 비교에는 state macro ADE와 DRIVE/AVOID 분리 지표를 사용했다.
-AVOID steering MAE 0.321은 약 12.8°이므로 open-loop 경로 지표가 좋아도 direct
-control 회피를 바로 안전하다고 판단할 수 없다. epoch별 원본 결과는
-[`results/tcp_morai_full_policy_v1/`](results/tcp_morai_full_policy_v1/)에 보관한다.
-
-#### 실제 입력 전처리 확인
-
-원본 TCP control attention은 ResNet feature map을 8×29로 고정해 256×900 입력을
-요구한다. MORAI 640×360 front frame은 crop 없이 900×256으로 강제 resize되므로
-내용은 사라지지 않지만 가로로 늘고 세로로 눌린다. 이는 현재 실험의 명시적인
-domain/preprocessing 한계이며 향후 aspect-preserving adapter 또는 attention
-shape 변경으로 비교해야 한다.
-
-| 일반 DRIVE 입력 | 빨간불 STOP 입력 |
-| --- | --- |
-| ![TCP actual input](assets/tcp_full_policy_v1/figures/original_vs_actual_tcp_input.png) | ![TCP stop input](assets/tcp_full_policy_v1/figures/original_vs_actual_tcp_input_stop.png) |
-
-#### Open-loop bag replay
-
-- [한 바퀴 DRIVE 추론 영상](assets/tcp_full_policy_v1/videos/epoch_010_best_one_lap.mp4)
-- [DRIVE / STOP / AVOID 포함 추론 영상](assets/tcp_full_policy_v1/videos/epoch_010_drive_stop_avoid_full_camera.mp4)
-
-두 영상은 recorded bag을 재생한 **open-loop** 결과다. 아래 5.3절의 두
-closed-loop 주행과 구분하며, 영상의 검은 제목 바는 카메라 아래로 배치해 상단
-신호등을 가리지 않도록 수정했다.
-
-#### Command-map + bag별 AVOID 최종 학습
-
-최종 TCP 학습에서는 bag 내부 navigation command를 사용하지 않았다. 기존에
-검수한 30 m command map(짧은 LEFT 제거 및 신호 교차로 STRAIGHT 보정)을
-그대로 유지하고, 각 bag에서 수동 검수된 `action_state == AVOID` 구간만 TCP
-command index 4로 덮어썼다. AVOID 진입 전 접근 구간은 별도 sampling 범주로
-강조했지만 command 자체는 원래 지도 command를 유지한다.
-
-학습에 실제 사용된 데이터는 원본 301 bags(사람 188, PDM-Lite teacher 113),
-변환 후 581 runs다. effective split은 train 487 runs/127,872 samples,
-validation 47 runs/14,140 samples, test 47 runs이며 원본 bag 단위로 분리했다.
-학습 batch는 AVOID 접근 20%, AVOID active 25%, 신호 DRIVE 20%, 신호 STOP
-15%, 일반 replay 20%가 되도록 weighted sampling했다.
-
-10 epochs 학습 후 마지막 checkpoint에서 20 epochs를 추가해 누적 30 epochs를
-학습했다. 종합 hard-event selection score 기준 최종 epoch가 best였다.
-
-| Validation 지표 | 초기 10-epoch best | 누적 30-epoch best |
-| --- | ---: | ---: |
-| 전체 ADE | 0.487 m | **0.460 m** |
-| FDE@2s | 0.837 m | **0.791 m** |
-| Current/Future control MAE | 0.069 / 0.093 | **0.061 / 0.087** |
-| 일반 replay ADE | 0.499 m | **0.466 m** |
-| 신호 DRIVE ADE | 0.555 m | **0.537 m** |
-| 신호 STOP ADE | **0.161 m** | 0.176 m |
-| AVOID ADE | 0.592 m | **0.581 m** |
-| AVOID 접근 ADE | **0.642 m** | 0.660 m |
-
-일반 경로와 직접 제어는 개선됐지만 AVOID train/validation ADE가 최종
-0.089/0.581 m로 크게 벌어졌다. 따라서 추가 epoch보다 서로 다른 장애물 위치,
-종류, 접근 속도, 좌·우 회피 및 장애물 없는 대응 장면을 포함한 독립 AVOID bag
-확장이 우선이다. 재현 가능한 최종 수치는
-[`results/tcp_command_map_plus_bag_avoid_v1/final_summary.json`](results/tcp_command_map_plus_bag_avoid_v1/final_summary.json)에 보관한다.
-
-#### 2026-09-15 teacher bag 확장 학습 (진행 중)
-
-기존 AVOID 일반화 부족을 보완하기 위해 2026-09-14~15에 수집한 192 bags를
-추가했다. 너무 짧아 4초 미래 label을 만들 수 없는 1 bag은 원본을 삭제하지 않고
-별도 제외 폴더로 이동했다. 변환된 teacher dataset은 기존 113 runs와 신규 192
-runs를 합쳐 305 runs, 284,158 samples이다.
-
-| Teacher 데이터 항목 | 값 |
-| --- | ---: |
-| 전체 run / sample | 305 / 284,158 |
-| DRIVE | 233,766 (82.3%) |
-| STOP | 40,178 (14.1%) |
-| AVOID | 10,214 (3.6%) |
-| GPS blackout | 23,432 |
-| 수동 검수 저속 구간 제외 | 16 intervals / 971 samples |
-
-Command는 bag에 기록된 navigation command를 다시 사용하지 않는다. 기존에 직접
-검수한 **30 m command map**을 유지하고, 짧은 LEFT 제거와 신호 교차로 STRAIGHT
-보정을 적용한 뒤 각 bag의 `action_state == AVOID` 구간만 MORAI 전용 command
-index 4로 덮어쓴다. 위치 조회에는 privileged teacher pose가 아니라
-`/localization/kinematic_state`를 사용한다.
-
-저속 제외는 `DRIVE` 또는 `AVOID` 상태에서 3 km/h 미만이 5초 이상 지속된
-비정상 구간만 대상으로 한다. 해당 구간과 현재 시점부터 4초 미래 supervision
-window가 겹치는 sample을 제외하며 raw bag과 pose 값은 수정하지 않는다. 정상적인
-신호 STOP은 보존한다. bag 끝의 5초 이상 연속 STOP은 전체 305 runs 중 1 run,
-25 samples(6.25초)뿐이어서 이번 실험에서는 유지했다.
-
-사람 검수 데이터까지 결합한 effective split은 train 719 runs/258,922 samples,
-validation 76 runs/31,539 samples, test 78 runs이다. split은 source run 단위로
-유지한다. 학습은 `tcp_teacher_full_policy_v6_command_fixed_b32_cont29/best.pt`를
-초기화로 사용하고 encoder와 두 control/trajectory branch를 모두 풀어 10 epochs
-fine-tuning한다. batch size는 80이며 AVOID 접근 20%, AVOID active 25%, 신호
-DRIVE 20%, 신호 STOP 15%, 일반 replay 20%의 hard-event sampling을 사용한다.
-
-Epoch 1의 600/3,237 step까지 집계된 값은 아래와 같다. 이는 validation 결과가
-아닌 누적 train 평균이므로 최종 성능 판단에는 사용하지 않는다.
-
-| Train 지표 | Step 100 | Step 600 |
-| --- | ---: | ---: |
-| 전체 ADE | 0.828 m | 0.643 m |
-| FDE@2s | 1.460 m | 1.122 m |
-| AVOID ADE | 0.944 m | 0.747 m |
-| AVOID 접근 ADE | 0.901 m | 0.653 m |
-| 신호 DRIVE ADE | 0.948 m | 0.680 m |
-| 신호 STOP ADE | 0.307 m | 0.236 m |
-| current/future control MAE | 0.162 / 0.211 | 0.131 / 0.185 |
-
-초기 train 지표는 연속적으로 하락하고 있으며 non-finite 오류는 관측되지 않았다.
-그러나 데이터 수 증가만으로 일반화가 보장되지는 않는다. 최종 checkpoint는
-AVOID·AVOID 접근·신호 DRIVE·일반 replay의 validation 분리 지표와 새로운 bag의
-closed-loop 회피 성공 여부를 함께 비교해 선택한다.
-
-### 4.4 SimLingo-Base MORAI adaptation
-
-공식 full SimLingo VLA를 LoRA로 조정한 실험과 구분해, SimLingo-Base의
-driving-only recipe를 MORAI teacher bag에 맞춰 구현했다.
-
-```text
-Front RGB 672×336 → two 336×336 patches
-                         │
-              pretrained CLIP ViT-L/14-336
-                 full fine-tuning
-                         │
-      scratch LLaMA-style decoder, 12×512, 8 heads
-                         ├─ 20-point geometric route head
-                         └─ 10-point / 2-second waypoint head
-```
-
-- 입력: front RGB, current speed, 10 m target point
-- 전체 parameters: 약 354.9M
-- effective batch size: 28
-- 학습 길이: 30 epochs
-- validation split: source bag 단위 분리
-
-2026-09-07 현재 완료된 checkpoint 중 best는 Epoch 26이다.
-
-| 항목 | SimLingo-Base Epoch 26 |
-| --- | ---: |
-| Val ADE | **0.543 m** |
-| Val FDE@2s | **1.135 m** |
-| Train ADE | 0.185 m |
-| Train FDE@2s | 0.365 m |
-
-기존 47-bag TCP full-policy best는 Val ADE 0.641 m, FDE@2s 1.122 m다.
-SimLingo의 평균 ADE가 낮지만 두 모델의 sampling 정의가 같지는 않다. TCP는
-0.6/1.0/1.6/2.0초 네 horizon, SimLingo adaptation은 0.2초 간격 10개 point를
-사용한다. 또한 SimLingo는 평균 경로 형상에 비해 2초 종방향 endpoint 오차가
-크고 train-validation gap이 남아 있다. 따라서 모델 우열은 closed-loop 성공률,
-상태별 오차와 temporal stability까지 측정한 뒤 판단한다.
-
-아래 GIF는 Epoch 21 best 당시 생성한 recorded validation bag의 **open-loop**
-STOP·AVOID 구간이다. 이후 Epoch 26에서 수치가 갱신됐으며, 최종 30-epoch
-checkpoint 영상은 학습 종료 후 별도로 교체한다.
-
-![SimLingo-Base STOP AVOID open-loop](assets/morai_current/simlingo_epoch21_stop_avoid.gif)
-
-### 4.5 88-bag TCP 재학습 계획
-
-확장 데이터 실험은 이전 Epoch 9/10 checkpoint에서 이어 학습하지 않는다.
-동일 공개 pretrained TCP를 initialization으로 사용하고 encoder와 trajectory,
-current/future control branch를 모두 풀어 처음부터 fine-tuning한다. 이를 통해
-47 bags에서 88 bags로 늘어난 효과를 공정하게 비교한다. pretrained TCP는
-frozen teacher가 아니며 feature/value distillation과 teacher action KL도 쓰지
-않는다.
-
-## 5. 정성 평가와 closed-loop 주행
-
-정량 지표만으로는 경로 형상, 상태 전환 시점, MPC가 실제로 경로를 추종할 수
-있는지를 판단할 수 없다. 따라서 기록된 bag을 이용한 open-loop 추론과 모델
-출력을 차량 제어에 되먹임한 closed-loop 주행을 분리해 평가했다.
-
-### 5.1 V17 open-loop bag replay
-
-아래 결과는 카메라 3대, LiDAR BEV, DRIVE/AVOID candidate, action probability,
-station별 speed를 함께 표시한 open-loop 추론이다. state queue, MPC와 차량
-동역학은 평가에 포함되지 않는다.
-
-| DRIVE | STOP | AVOID |
+| 경로 조건 | 정의 | 목적 |
 | --- | --- | --- |
-| ![V17 DRIVE replay](assets/morai_v17/videos/v17_green_crossing_drive.gif) | ![V17 STOP replay](assets/morai_v17/videos/v17_green_crossing_stop.gif) | ![V17 AVOID replay](assets/morai_v17/videos/v17_static_obstacle_avoid.gif) |
+| Target point | 누적 경로 거리 약 10 m의 2D goal | 근거리 기하 유도 |
+| High-level command | 최대 30 m route context에서 계산 | 장거리 navigation intent |
 
-### 5.2 TCP/MPC baseline open-loop bag replay
+High-level command는 `LEFT`, `RIGHT`, `STRAIGHT`, `LANEFOLLOW`로 구성합니다. 30 m 구간의 곡률과
+MGeo traffic-light node를 이용해 명령을 정하고, 동일한 영상에서도 목적 경로에 맞는 행동을 선택할
+수 있도록 합니다.
 
-아래 영상은 V17 결과가 아니라 비교용 TCP/MPC baseline의 open-loop 결과다.
+## TCP 주행 정책
 
-| 파란불 직진 | 일반 신호등 | 정적 장애물 속도 preview |
-| --- | --- | --- |
-| ![TCP green crossing](assets/morai_v17/videos/tcp_green_crossing.gif) | ![TCP green signal crossing](assets/morai_v17/videos/tcp_green_signal_crossing.gif) | ![TCP static obstacle speed preview](assets/morai_v17/videos/tcp_static_obstacle_speed_preview.gif) |
+TCP는 하나의 ResNet34 visual encoder를 공유하는 trajectory branch와 control branch를 사용합니다.
+CARLA pretrained TCP checkpoint는 초기 가중치로만 사용하며, MORAI demonstration으로 전체
+policy를 supervised fine-tuning합니다. 별도의 frozen teacher, feature/value distillation, teacher
+action KL은 사용하지 않습니다.
 
-### 5.3 State-based closed-loop 주행
+```text
+Front RGB 640x360 ── ResNet34 ── visual feature ───────────┐
+                                                         │
+Speed + target point + command ── measurement MLP ───────┤
+                                                         ▼
+                                    ┌─ Trajectory GRU
+                                    │    └─ waypoints at 0.6/1.0/1.6/2.0 s
+                                    │
+                                    └─ Spatial attention + Control GRU
+                                         ├─ current acceleration / steering
+                                         └─ 4-step future acceleration / steering
+```
 
-다음 두 영상만 모델 출력이 실제 주행 경로와 상태 선택에 반영된 closed-loop
-결과다. 위의 open-loop bag replay와 구분한다.
-
-#### TCP state-only DRIVE / STOP
-
-![TCP state-only DRIVE STOP closed-loop](assets/morai_v17/videos/tcp_state_only_drive_stop_closed_loop.gif)
-
-[원본 MKV 다운로드](assets/morai_v17/videos/TCP_state%20only_drive%2Cstop.mkv)
-
-#### V17 state-based
-
-![V17 state-based closed-loop](assets/morai_v17/videos/v17_state_based_closed_loop.gif)
-
-[원본 MKV 다운로드](assets/morai_v17/videos/v17_State_based.mkv)
-
-두 closed-loop 영상은 상태 판단과 경로 출력을 실제 제어 계층에 연결할 수 있음을
-보여준다. 다만 제한된 MORAI 코스의 실험 결과이며, 처음 보는 장애물과 더 다양한
-교차로에 대한 일반화를 보증하지는 않는다.
-
-## 6. Runtime·MPC·안전 설계
-
-### 6.1 State-based smoothing
-
-trajectory는 매 시점의 ego-relative 좌표이므로 이전 출력과 현재 출력을
-그대로 평균 내면 안 된다. 이전 경로를 pose 변화만큼 현재 ego frame으로
-변환한 뒤 state별 EMA를 적용한다.
-
-아래 내용은 closed-loop 주행을 안정화하기 위한 state 기반 runtime 처리 원칙이다.
-
-| 상태 | 처리 |
+| 항목 | 구성 |
 | --- | --- |
-| DRIVE | 새 예측 가중치 `alpha=0.20~0.30`으로 안정화 |
-| AVOID 진입 | `alpha=0.65~0.80`으로 빠르게 반응 |
-| AVOID 유지 | `alpha=0.35~0.50`으로 경로 진동 억제 |
-| STOP 진입 | 경로 EMA 대신 즉시 목표 속도 0, 마지막 안정 경로 유지 |
-| STOP 해제 | `alpha=0.15~0.25`로 서서히 DRIVE 복귀 |
-| 긴급 정지 | EMA와 state queue를 우회하고 Safety Monitor가 즉시 정지 |
+| 영상 입력 | 전방 RGB, 640x360 종횡비 유지 |
+| 상태 입력 | current speed |
+| 경로 입력 | 약 10 m target point, 30 m high-level command |
+| 궤적 출력 | 0.6 / 1.0 / 1.6 / 2.0 s의 4개 ego-relative waypoint |
+| 제어 출력 | 현재 및 미래 steering / signed acceleration |
+| 제어 분포 | Beta distribution의 `alpha`, `beta` |
 
-state probability에도 EMA와 비대칭 hysteresis를 둔다. STOP은 1~2 frame,
-AVOID는 2~3 frame 연속 확인 후 진입하고, DRIVE 복귀는 5~10 frame 연속
-확인한다.
+원본 TCP의 `8x29` attention grid는 실제 feature map 크기로 bilinear interpolation한 뒤 합이 1이
+되도록 다시 정규화합니다. 따라서 640x360 영상을 900x256으로 강제 변형하지 않고 원래 종횡비를
+유지합니다.
 
-### 6.2 ROS/MPC 처리 순서
+## 데이터 생성과 학습
 
-1. V17은 두 path candidate, speed candidate, action probability를 동시에 출력한다.
-2. state queue와 confidence threshold가 action을 안정화한다. 모델 내부 argmax가 곧바로 제어 명령이 되지 않는다.
-3. DRIVE는 기본 참조 경로를, AVOID는 회피 candidate를, STOP은 speed=0을 선택한다.
-4. 이전 path를 현재 ego frame으로 변환한 뒤 state-dependent smoothing을 적용한다.
-5. 선택된 path는 origin 삽입, 0.1 m resampling 후 MPC reference로 전달한다.
-6. TTC·충돌 임박 조건은 모델 선택보다 우선하는 external safety monitor가 처리한다.
+### PDM-Lite teacher와 human demonstration
 
-## 7. 재현 방법
+CARLA와 MORAI 사이의 영상, 도로 기하, 신호 체계, 차량 거동 차이를 줄이기 위해 MORAI에서 직접
+demonstration을 수집했습니다.
+
+- **PDM-Lite teacher**: MGeo 전역 경로와 kinematic bicycle MPC를 이용해 반복 가능한 nominal
+  behavior를 생성합니다.
+- **Human driving**: teacher만으로 얻기 어려운 off-nominal 상태와 복구 주행을 보완합니다.
+- **신호 대응**: 국내 신호 전이 규칙에 따라 정지, 대기, 재출발 상황을 생성합니다.
+- **장애물 대응**: 정적 장애물은 우회하고, 동적 장애물은 위험이 해소될 때까지 정지합니다.
+
+카메라 frame timestamp를 기준으로 vehicle state, localization, route, control을 정렬합니다. Split은
+sample이 아닌 source run 단위로 고정해 같은 원본 주행에서 파생된 구간이 train과 test에 동시에
+들어가는 것을 방지합니다.
+
+### 최종 데이터셋
+
+| Split | Processed runs | Samples |
+| --- | ---: | ---: |
+| Train | 817 | 444,048 |
+| Validation | 88 | 51,794 |
+| Test | 88 | 44,562 |
+| **합계** | **993** | **540,404** |
+
+Checkpoint 선택에는 validation split만 사용하고 test split은 최종 평가에만 사용했습니다.
+
+### Hard-event rebalancing
+
+희소한 신호·회피 상황이 일반 주행에 묻히지 않도록 mini-batch를 다음 목표 비율로 구성합니다.
+
+| 범주 | 목표 비율 |
+| --- | ---: |
+| AVOID approach | 20% |
+| AVOID active | 25% |
+| Signal DRIVE | 20% |
+| Signal STOP | 15% |
+| General replay | 20% |
+
+### Loss와 학습 설정
+
+```text
+L = L_waypoint + 0.05 L_speed + 0.5 L_current + 0.5 L_future
+```
+
+Waypoint와 speed에는 L1 loss, 현재·미래 control에는 Smooth L1 loss를 사용합니다. Beta 분포의 평균을
+`[-1, 1]` 범위의 deterministic action으로 변환해 ground truth와 비교합니다.
+
+| 항목 | 설정 |
+| --- | --- |
+| Initialization | CARLA pretrained TCP |
+| Selected checkpoint | Epoch 26 |
+| Batch size | 80 |
+| Head learning rate | `1e-4` |
+| Backbone learning rate | `1e-5` |
+| Weight decay | `1e-6` |
+| Gradient clipping | 5.0 |
+| Optimizer / scheduler | AdamW / CosineAnnealingLR |
+
+## 평가 결과
+
+### Held-out open-loop test
+
+| 지표 | 결과 |
+| --- | ---: |
+| ADE / FDE@2 s | **0.2924 m / 0.5225 m** |
+| Current / future control MAE | 0.0392 / 0.0698 |
+| 0.6 / 1.0 / 1.6 / 2.0 s trajectory error | 0.0993 / 0.1852 / 0.3627 / 0.5225 m |
+| Signal STOP ADE | 0.1724 m |
+| Signal DRIVE ADE | 0.3116 m |
+| General replay ADE | 0.2966 m |
+| AVOID ADE | 0.4563 m |
+| AVOID approach ADE | 0.7519 m |
+
+AVOID approach는 40 samples로 표본 수가 작으므로 절대 성능 비교에 주의해야 합니다.
+
+### 동일 subset 모델 비교
+
+Side camera와 LiDAR가 모두 존재하는 36 runs의 공통 test subset에서 비교했습니다.
+
+| 모델 | ADE | FDE@2 s |
+| --- | ---: | ---: |
+| **TCP** | **0.4069 m** | **0.6917 m** |
+| SimLingo-Base | 1.0468 m | 2.0688 m |
+| TransFuser | 1.3495 m | 2.2013 m |
+
+보고서 7.2절은 이 subset을 26,190 samples로 기술하지만 7.1절에는 2,619 samples로 적혀 있습니다.
+이 README는 결과 표가 제시된 7.2절의 26,190을 기준으로 하며, 재평가 시 frozen manifest의 sample
+수를 함께 확인해야 합니다.
+
+### Domain adaptation
+
+| 학습 조건 | 공통 subset ADE |
+| --- | ---: |
+| CARLA pretrained zero-shot | 3.6045 m |
+| MORAI basic supervised fine-tuning | 0.7189 m |
+| Teacher-only + hard-event | 1.1569 m |
+| Human/PDM mixed, Epoch 4 | 0.4675 m |
+| **Human/PDM mixed, Epoch 26** | **0.4069 m** |
+
+각 checkpoint는 데이터 구성과 학습 전략이 함께 다르므로, 이 표는 단일 요인의 독립적인 ablation이
+아니라 학습 조건별 비교입니다.
+
+### Closed-loop controller 비교
+
+각 controller는 MORAI에서 4 laps를 주행했으며, 기록된 ROS bag 기준으로 비교했습니다.
+
+| 제어 방식 | 완주율 | Mean error | RMSE | Max error | Std |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| **TCP direct** | **100.0%** | **0.38 m** | **0.55 m** | 3.08 m | **0.38 m** |
+| Stanley on TCP trajectory | **100.0%** | 0.72 m | 0.83 m | 3.00 m | 0.41 m |
+| MPC on TCP trajectory | 85.2% | 0.59 m | 0.74 m | 2.78 m | 0.45 m |
+| Pure Pursuit on TCP trajectory | 69.9% | - | - | - | - |
+
+최대 오차는 주로 장애물 회피를 위해 기준 경로를 벗어난 구간에서 발생했습니다. 한정된 로그의
+완주 결과이므로 여러 seed와 새로운 장애물 배치를 사용한 추가 폐루프 평가가 필요합니다.
+
+### Localization 비교
+
+- GPS+IMU+Wheel EKF는 일반 주행에서 약 0.08-0.20 m 오차를 유지했습니다.
+- 약 11 s GPS blackout에서 누적 횡오차는 Pure Wheel 17.78 m·s, Kinematic State 16.08 m·s,
+  NDT+Wheel 11.77 m·s였습니다.
+- NDT는 10 Hz 기준 평균 연산 예산의 181.1%를 사용하고 0.12 s 초과 비율이 63.9%였습니다.
+- FAST-LIO와 KISS-ICP는 개활지의 부족한 기하 특징으로 크게 발산했습니다.
+
+일부 blackout 구간에서 NDT가 더 낮은 누적 오차를 보였지만, 실시간 deterministic update를 우선해
+최종 시스템은 경량 EKF를 사용했습니다.
+
+## Safety Monitor
+
+주행 모델은 전방 카메라만 보기 때문에 후측방 접근 차량과 센서 두절을 독립 모듈에서 감시합니다.
+
+### 후방 LiDAR와 TTC
+
+1. ROI crop, RANSAC ground removal, wall removal, voxel downsampling을 수행합니다.
+2. KD-tree Euclidean clustering으로 객체 후보를 생성합니다.
+3. Ego motion을 보정하고 Alpha-Beta filter로 위치와 속도를 추정합니다.
+4. MGeo 차선 중심선의 Frenet 좌표에서 횡·종방향 점유 시간 구간을 계산합니다.
+5. 두 구간이 3 s prediction horizon 안에서 겹치면 충돌 위험으로 판정합니다.
+
+충돌 판정이 2 frames 연속 성립하면 E-STOP을 발행하고, 5 frames 연속 안전할 때 해제합니다. 정지
+중 재출발은 4.0 m/s를 가정해 위험 판정이 불필요하게 해제되지 않도록 합니다.
+
+### 센서 watchdog
+
+IMU, LiDAR, vehicle speed의 마지막 수신 시각을 감시합니다. 기준 주파수를 `f_i`, 허용 결손 주기
+수를 `k`라 할 때 timeout은 `T_i = k / f_i`입니다. 모든 신호가 한 번 이상 정상 수신되기 전에는
+시스템을 ready로 전환하지 않으며, 주행 중 timeout이 발생하면 E-STOP을 발행합니다.
+
+## 저장소 구조
+
+```text
+VLA_Driving/
+├─ src/
+│  ├─ tcp_morai_finetune/              # TCP 모델, dataset, full-policy 학습·평가
+│  ├─ multimodal_planner_v17_spatial30/ # 이전 V17 멀티모달 실험 계보
+│  └─ vla_driving/                      # 경량 baseline, perception, planning, control
+├─ scripts/                             # ROS bag 변환, cache 생성, 학습·추론 도구
+├─ configs/                             # baseline 실험 설정
+├─ results/                             # 저장소에 포함된 TCP 실험 요약
+├─ assets/                              # 정성 평가 이미지와 영상
+└─ tests/                               # 단위·smoke tests
+```
+
+보고서가 설명하는 **전체 ROS 차량 스택** 가운데 EKF localization, MORAI UDP bridge, rear-LiDAR
+Safety Monitor, E-STOP arbitration은 이 저장소에 완전한 실행 패키지로 포함되어 있지 않습니다.
+이 저장소에서 직접 재현 가능한 범위는 주로 TCP 데이터 변환, 모델 학습·평가와 이전 planner
+실험입니다.
+
+## 설치
+
+Python 3.10 이상과 CUDA를 지원하는 PyTorch 환경을 권장합니다.
 
 ```bash
-pip install -e .
+git clone https://github.com/libok03/VLA_Driving.git
+cd VLA_Driving
 
-# unit-level fixed-station contract
-PYTHONPATH=src python -m unittest multimodal_planner_v17_spatial30.test_v17
-
-# dataset manifest와 checkpoint 경로를 준비한 뒤
-PYTHONPATH=src python -m multimodal_planner_v17_spatial30.train --help
-
-# TCP full-policy control cache and training
-pip install -e '.[morai]'
-PYTHONPATH=src python scripts/build_tcp_morai_control_cache.py --help
-PYTHONPATH=src python -m tcp_morai_finetune.train_full_policy --help
-PYTHONPATH=src python -m tcp_morai_finetune.evaluate_full_policy_by_state --help
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+python -m pip install --upgrade pip
+python -m pip install -e '.[morai]'
 ```
 
-V17은 `multimodal_planner_v9`, `v10`, `v13_goal_trajectory`, `v16_30m_candidates`의 공통 encoder·loss·metric 계보를 사용한다. 이 때문에 해당 소스도 `src/`에 함께 포함했다. raw MORAI/Bench2Drive 데이터 변환 결과와 pretrained weights는 별도 저장소 또는 로컬 SSD에서 관리한다.
+## 재현 방법
 
+### 1. Teacher bag 변환
 
-## 8. 개발 과정: V1 → V17과 변경 이유
+```bash
+python scripts/build_tcp_teacher_dataset.py \
+  --bag-dir /path/to/teacher_bags \
+  --output /path/to/teacher_processed \
+  --control-cache /path/to/teacher_controls
+```
 
-이 절은 현재 V17 구조가 만들어진 순서를 기록한다. 각 버전에서 잘되지
-않았던 지점을 다음 버전의 설계 변경으로 연결한다.
+### 2. Human / teacher dataset view 결합
 
-### V1
+```bash
+python scripts/build_tcp_combined_dataset_view.py \
+  --human-root /path/to/human_processed \
+  --human-split /path/to/human_split.json \
+  --human-controls /path/to/human_controls \
+  --teacher-root /path/to/teacher_processed \
+  --teacher-split /path/to/teacher_processed/split.json \
+  --teacher-controls /path/to/teacher_controls \
+  --output-root /path/to/combined_data \
+  --output-controls /path/to/combined_controls
+```
 
-멀티카메라, LiDAR, ego, MGeo, local route를 모두 넣어 미래 trajectory를 직접
-회귀하는 초기 설계였다. 센서와 지도 정보를 한 모델에 넣는 것 자체는
-가능했지만, 어떤 입력이 실제 상황 판단에 쓰였는지 분리하기 어려웠다.
+### 3. TCP full-policy fine-tuning
 
-### V2
+```bash
+python -m tcp_morai_finetune.train_full_policy \
+  --data-root /path/to/combined_data \
+  --split-manifest /path/to/combined_data/split.json \
+  --control-cache /path/to/combined_controls \
+  --init-checkpoint /path/to/carla_pretrained_tcp.pt \
+  --output-dir /path/to/training_output \
+  --epochs 26 \
+  --batch-size 80 \
+  --num-workers 8 \
+  --sampling-profile hard-events \
+  --selection-profile hard-events \
+  --hard-event-fractions 0.20 0.25 0.20 0.15 0.20
+```
 
-3-view camera, VLP16 BEV, ego, MGeo, local route와 5-frame temporal GRU,
-K=3 mode trajectory를 구현했다. bag/run 단위 split, GPS blackout 유지·가중치,
-epoch별 outlier gallery를 도입해 데이터 파이프라인을 검증했다. 다만 K=3
-candidate의 선택과 평균화가 제어 경로의 안정성을 보장하지는 못했다.
+### 4. Split별 평가
 
-### V3
+```bash
+python -m tcp_morai_finetune.evaluate_full_policy_by_state \
+  --checkpoint /path/to/best.pt \
+  --data-root /path/to/combined_data \
+  --split-manifest /path/to/combined_data/split.json \
+  --control-cache /path/to/combined_controls \
+  --split test \
+  --output /path/to/test_metrics.json \
+  --batch-size 80
+```
 
-label을 ego-relative `relative_x, relative_y, relative_yaw, future_speed`로
-명확히 하고, 1/2/4초 ADE/FDE, lateral/longitudinal/yaw MAE,
-blackout 분리 지표를 추가했다. 문제를 측정할 수 있게 됐지만, 여전히
-20점·4초 시간 축 trajectory와 mode 선택을 함께 학습했다.
+### 5. 저장소 테스트
 
-### V4
+```bash
+python -m pytest
+```
 
-mode를 없애 K=1 trajectory로 단순화하고, 위치뿐 아니라 step, 2차 차분,
-yaw-heading consistency를 GT와 맞추는 loss를 넣었다. 예측 궤적을 무조건
-직선으로 펴는 대신 GT의 미분 구조를 따르게 한 변경이다. 학습 중 non-finite
-출력이 발생해 FP32 재시도와 tensor 검사를 추가했다.
+대용량 입력은 `.gitignore`의 `raw_bags/`, `data/`, `checkpoints/`, `outputs/` 아래에서 별도로
+관리하십시오. 재현에는 공개 TCP initialization checkpoint와 보고서 평가에 사용한 split manifest가
+추가로 필요합니다.
 
-### V5
+## 정성 결과
 
-V4에서 첫 future point가 원점 뒤로 가거나 경로가 출발 직후 꺾이던 문제를
-고쳤다. controller용 trajectory에 현재 원점 `(0,0)`을 명시적으로 붙이고
-first-point/start loss를 추가했다. 시작 경계는 개선됐지만 자유로운 4초
-trajectory 회귀는 MPC reference로 쓰기에는 계속 불안정했다.
+| 실제 TCP 입력 예시 | Open-loop DRIVE / STOP / AVOID |
+| --- | --- |
+| ![TCP input](assets/tcp_full_policy_v1/figures/original_vs_actual_tcp_input.png) | ![TCP replay](assets/morai_current/tcp_state_drive_stop_avoid.gif) |
 
-### V6
+- [한 바퀴 open-loop 추론 영상](assets/tcp_full_policy_v1/videos/epoch_010_best_one_lap.mp4)
+- [DRIVE / STOP / AVOID open-loop 추론 영상](assets/tcp_full_policy_v1/videos/epoch_010_drive_stop_avoid_full_camera.mp4)
 
-정지 장면을 trajectory 하나로 설명하지 않고 STOP/DRIVE head를 추가했다.
-정지 label은 미래 속도와 local distance로 정의하고, class-weighted loss와
-confusion matrix를 도입했다. 하지만 상태를 모델 내부 trajectory에 직접
-condition하면 frame마다 상태가 바뀔 때 제어가 흔들릴 수 있었다.
+위 영상은 recorded bag replay이며 실제 차량 상태에 모델 출력을 되먹임한 closed-loop 결과와
+구분해야 합니다.
 
-### V7
+## 참고 문헌
 
-경로 전체를 새로 생성하지 않고 Local Route를 기하 prior로 두며,
-camera·LiDAR·history가 path-normal residual `Δd`와 speed delta를 예측하도록
-바꿨다. 일반 주행에서는 안정적이었지만, route와 MGeo의 정보가 강해지면서
-센서가 장애물 장면을 충분히 보지 않아도 되는 shortcut이 생겼다.
+1. P. Wu et al., “Trajectory-guided Control Prediction for End-to-end Autonomous Driving: A Simple yet Strong Baseline,” NeurIPS, 2022.
+2. J. Beißwenger, “PDM-Lite: A Rule-Based Planner for CARLA Leaderboard 2.0,” University of Tübingen, 2024.
+3. MORAI, “MORAI SIM / MGeo Documentation,” MORAI SIM User Manual.
+4. K. Chitta et al., “TransFuser: Imitation with Transformer-Based Sensor Fusion for Autonomous Driving,” TPAMI, 2023.
+5. K. Renz et al., “SimLingo: Vision-Only Closed-Loop Autonomous Driving with Language-Action Alignment,” CVPR, 2025.
 
-### V8
+## 팀
 
-MPC가 속도 계획을 수행한다는 전제에서 learned speed imitation을 제거하고,
-fixed-distance `Δd`와 STOP/DRIVE만 남겼다. 장거리 global route에도 residual을
-더할 수 있었지만, 일반 경로 오차까지 `Δd`가 보정하려 해 불필요한 횡방향
-움직임이 생길 수 있었다.
+**ACCA · 숭실대학교**
 
-### V9
-
-route tracking과 mission correction을 분리했다. DRIVE는 기본 route, STOP은
-속도 0, AVOID만 `Δd`와 `Δv`를 적용하도록 DRIVE/STOP/AVOID 3-action
-계약을 만들었다. raw action·residual은 모두 출력하고 적용 여부는 runtime
-state machine이 결정하게 했다. 이 단계에서 action label의 위치 편향과 AVOID
-데이터 부족이 드러났다.
-
-### V10
-
-action classifier에서 ego/localization 16차원을 제거하고 camera·LiDAR·route
-중심으로 바꿨다. `Δd, Δv`를 6개 waypoint로 줄였으며, STOP은 계속
-classification-only로 유지했다. route residual 구조 자체는 남아 있어,
-route를 주지 않는 일반화에는 한계가 있었다.
-
-### V11
-
-candidate path와 speed distribution을 분리해 불확실성을 다루는 실험을 했다.
-speed에는 Beta 분포 기반 objective를 사용했고, trajectory와 분류가 서로
-loss scale을 침범하지 않도록 분리했다. 그러나 route residual과 시간 축
-trajectory의 근본 문제는 남아 있었다.
-
-### V12
-
-Bench2Drive representation pretraining과 MORAI adaptation을 검토·준비했다.
-목적은 작은 MORAI 데이터만으로 camera·LiDAR encoder를 처음부터 학습하지
-않는 것이었다. 이 단계는 deployment 구조 변경보다 도메인 전이와 데이터
-변환 검증에 집중했다.
-
-### V13
-
-local route 전체 대신 단일 goal을 조건으로 trajectory를 생성하는
-goal-trajectory 계열을 도입했다. 이는 route 복사 shortcut을 줄이기 위한
-전환이었다. 다만 시간 기반 위치 target을 유지하면 current speed를 입력에서
-제거한 경우 종방향 label이 하나로 정해지지 않는 문제가 남았다.
-
-### V14
-
-Bench2Drive 초기화 후 MORAI fine-tuning을 본격적으로 수행했다. 초기 epoch의
-검증 성능은 개선됐지만 backbone unfreeze 뒤 training error만 낮아지고
-validation error가 악화되는 과적합을 확인했다. 따라서 best validation
-checkpoint 선택과 stronger augmentation/데이터 다양화가 필요해졌다.
-
-### V15
-
-V14의 과적합과 시간 축 target 문제를 분리해 점검한 조정 단계다. camera
-도메인 적응만으로 경로 contract의 모순을 해결할 수 없다는 결론을 얻었고,
-다음 버전에서 sparse goal/candidate 형식으로 바꾸는 근거가 됐다.
-
-### V16
-
-33.33 m 단일 goal과 TCP-style 6-point DRIVE/AVOID candidate, absolute speed,
-3-action head를 만들었다. current speed, ego/GPS, MGeo, local route를 모델
-입력에서 제외하고, runtime이 candidate를 선택하도록 했다. 하지만 path의
-의미가 여전히 시간 축과 결합돼 있어 속도가 달라질 때 동일한 geometry를
-요구하는 문제가 완전히 사라지지 않았다.
-
-### V17
-
-V16의 입력 절제와 candidate 분리를 유지하되, path target을
-**3/6/10/15/22/30 m 고정 공간 station**으로 완전히 바꿨다. 따라서
-current speed가 없어도 path geometry label은 모순되지 않는다. local route는
-오직 offline label/goal 생성에만 사용하며, STOP은 path loss에 넣지 않는다.
-현재 검증 지표는 본문 표와 같고, 남은 과제는 폐루프 MPC 평가와 처음 보는
-장애물에 대한 AVOID 일반화다.
-
-## 9. Fallback과 안전 경계
-
-V17 또는 TCP state 모델의 출력을 조향·가감속 명령으로 직접 신뢰하지
-않는다. planner 출력이 non-finite이거나, action confidence가 낮거나,
-state queue가 아직 안정화되지 않았거나, TTC safety monitor가 위험을
-감지하면 학습 candidate를 적용하지 않는다.
-
-이 경우 runtime은 기본 global/local centerline과 보수적 속도 제한을 MPC에
-전달한다. STOP 또는 충돌 임박이면 목표 속도를 0으로 강제한다. 즉 학습
-모델은 기본 경로의 보정·상황 판단 후보를 제공하고, 차선 유지·급정지·충돌
-회피의 최종 책임은 MPC와 safety monitor에 남긴다.
+2026 대학생 AI·S/W 모빌리티 경진대회 AI 융합 자율주행 부문
