@@ -22,7 +22,9 @@ ADE는 예측 웨이포인트의 평균 위치 오차이고, FDE는 2초 지점�
 
 ## 데모
 
-![기록된 MORAI 주행에서 TCP의 DRIVE, STOP, AVOID 예측을 보여주는 오픈루프 재생](assets/morai_current/tcp_state_drive_stop_avoid.gif)
+| TCP 영상 입력 예시 | DRIVE / STOP / AVOID 예측 |
+| --- | --- |
+| ![원본 TCP와 MORAI에 맞춘 TCP의 카메라 입력 비교](assets/tcp_full_policy_v1/figures/original_vs_actual_tcp_input.png) | ![기록된 MORAI 주행에서 TCP의 DRIVE, STOP, AVOID 예측을 보여주는 오픈루프 재생](assets/morai_current/tcp_state_drive_stop_avoid.gif) |
 
 기록된 ROS bag을 입력으로 사용한 **오픈루프 재생**입니다. [한 바퀴 재생](assets/tcp_full_policy_v1/videos/epoch_010_best_one_lap.mp4) · [DRIVE / STOP / AVOID 재생](assets/tcp_full_policy_v1/videos/epoch_010_drive_stop_avoid_full_camera.mp4)
 
